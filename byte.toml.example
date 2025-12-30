@@ -1,0 +1,51 @@
+# Byte Project Configuration
+# This file defines the project composition and intent
+
+[project]
+# Project name
+name = "example-project"
+# Project type: cli, desktop, web
+type = "cli"
+# Project description (for documentation)
+description = "Example CLI project"
+
+# Ecosystem drivers participating in this project
+# Byte resolves compatible drivers based on capabilities
+[drivers]
+# Ordered list of drivers to use
+use = ["go", "bun"]
+# Capability requirements
+capabilities = [
+  { name = "backend", driver = "go" },
+  { name = "frontend", driver = "bun" },
+]
+
+# Go-specific configuration
+[drivers.go]
+# Module path for Go project
+module_path = "github.com/username/example-project"
+# Use go modules
+use_modules = true
+
+# Bun-specific configuration
+[drivers.bun]
+# Package name
+package_name = "example-project"
+# TypeScript support
+typescript = true
+# Build target: cli, web, server
+target = "cli"
+
+# Features to include
+[features]
+# Database support
+database = ["sqlite"]
+# Testing framework
+testing = ["testify"]
+# Code quality
+linting = ["golangci-lint", "eslint"]
+
+# Custom template overrides
+[templates]
+# Path to custom templates (relative to project root)
+custom_templates = ".byte/templates"

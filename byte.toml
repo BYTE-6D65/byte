@@ -1,0 +1,36 @@
+# Byte Local Project Configuration
+# This file controls Byte's runtime behavior for this project
+
+[logging]
+# Log level: trace, debug, info, warn, error
+level = "info"
+# Log file location (relative to project root)
+log_dir = "target/logs"
+# Maximum log file size in MB before rotation
+max_log_size_mb = 10
+# Maximum number of log files to retain per command
+max_log_files = 5
+# Maximum age of logs in days before cleanup
+max_log_age_days = 30
+
+[drivers]
+# Additional paths to search for drivers
+search_paths = [
+  "drivers/",
+]
+
+[tui]
+# Terminal refresh rate in milliseconds
+refresh_rate_ms = 16
+# Enable/disable animations
+animations = true
+# Default view on startup: "browser", "palette", "detail"
+default_view = "browser"
+
+[explain]
+# Default to explain mode (preview without execution)
+dry_run_by_default = false
+# Show detailed command traces
+show_command_traces = true
+# Show generated files preview
+show_file_preview = true
