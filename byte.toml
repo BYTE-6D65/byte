@@ -1,36 +1,36 @@
-# Byte Local Project Configuration
-# This file controls Byte's runtime behavior for this project
+# Byte project configuration
+# Making byte itself "byte compatible"
 
-[logging]
-# Log level: trace, debug, info, warn, error
-level = "info"
-# Log file location (relative to project root)
-log_dir = "target/logs"
-# Maximum log file size in MB before rotation
-max_log_size_mb = 10
-# Maximum number of log files to retain per command
-max_log_files = 5
-# Maximum age of logs in days before cleanup
-max_log_age_days = 30
+[project]
+name = "byte"
+type = "cli"
+ecosystem = "rust"
+description = "Project orchestration tool for modern development workflows"
 
-[drivers]
-# Additional paths to search for drivers
-search_paths = [
-  "drivers/",
-]
+[build]
+# Development builds
+dev = "cargo build"
+# Release builds
+release = "cargo build --release"
+# Run the TUI
+run = "cargo run -- tui"
+# Run tests
+test = "cargo test"
+# Check without building
+check = "cargo check"
+# Format code
+fmt = "cargo fmt"
+# Lint
+lint = "cargo clippy -- -D warnings"
 
-[tui]
-# Terminal refresh rate in milliseconds
-refresh_rate_ms = 16
-# Enable/disable animations
-animations = true
-# Default view on startup: "browser", "palette", "detail"
-default_view = "browser"
-
-[explain]
-# Default to explain mode (preview without execution)
-dry_run_by_default = false
-# Show detailed command traces
-show_command_traces = true
-# Show generated files preview
-show_file_preview = true
+[commands]
+# Install byte locally
+install = "cargo install --path ."
+# Clean build artifacts
+clean = "cargo clean"
+# Build and run TUI
+dev-tui = "cargo run -- tui"
+# Full CI pipeline
+ci = "cargo fmt --check && cargo clippy -- -D warnings && cargo test && cargo build --release"
+# Discover projects (for testing)
+discover = "cargo run -- tui"

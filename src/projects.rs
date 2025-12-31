@@ -19,19 +19,34 @@ pub fn discover_projects(global_config: &GlobalConfig) -> Result<Vec<DiscoveredP
     // Scan workspace if auto_scan is enabled
     if global_config.workspace.auto_scan {
         let workspace_path = shellexpand::tilde(&global_config.workspace.path).to_string();
+        crate::logger::info(&format!("[DISCOVERY] Scanning primary workspace: {}", workspace_path));
         if let Ok(workspace_projects) = scan_directory(&workspace_path) {
+            crate::logger::info(&format!("[DISCOVERY] Found {} projects in primary workspace", workspace_projects.len()));
             projects.extend(workspace_projects);
+        } else {
+            crate::logger::info("[DISCOVERY] Failed to scan primary workspace");
         }
     }
 
-    // Add manually registered projects
+    // Scan manually registered directories for projects
     for registered_path in &global_config.workspace.registered {
         let expanded_path = shellexpand::tilde(registered_path).to_string();
-        if let Ok(project) = load_project(&expanded_path) {
-            projects.push(project);
+        crate::logger::info(&format!("[DISCOVERY] Scanning registered path: {}", expanded_path));
+        match scan_directory(&expanded_path) {
+            Ok(registered_projects) => {
+                crate::logger::info(&format!("[DISCOVERY] Found {} projects in {}", registered_projects.len(), expanded_path));
+                for proj in &registered_projects {
+                    crate::logger::info(&format!("[DISCOVERY]   - {} at {}", proj.config.project.name, proj.path.display()));
+                }
+                projects.extend(registered_projects);
+            }
+            Err(e) => {
+                crate::logger::info(&format!("[DISCOVERY] Failed to scan {}: {}", expanded_path, e));
+            }
         }
     }
 
+    crate::logger::info(&format!("[DISCOVERY] Total projects discovered: {}", projects.len()));
     Ok(projects)
 }
 
@@ -40,24 +55,45 @@ fn scan_directory(path: &str) -> Result<Vec<DiscoveredProject>> {
     let mut projects = Vec::new();
     let path = Path::new(path);
 
+    crate::logger::info(&format!("[SCAN] Scanning directory: {}", path.display()));
+
     if !path.exists() {
+        crate::logger::info(&format!("[SCAN] Path does not exist: {}", path.display()));
         return Ok(projects);
     }
 
     // Walk directory looking for byte.toml files
+    let mut entry_count = 0;
     for entry in WalkDir::new(path)
         .max_depth(3) // Don't go too deep
         .follow_links(false)
     {
-        let entry = entry?;
-        if entry.file_name() == "byte.toml" {
-            if let Some(project_dir) = entry.path().parent() {
-                if let Ok(project) = load_project(project_dir.to_str().unwrap_or("")) {
-                    projects.push(project);
+        match entry {
+            Ok(entry) => {
+                entry_count += 1;
+                let file_name = entry.file_name().to_string_lossy();
+                if file_name == "byte.toml" {
+                    crate::logger::info(&format!("[SCAN] Found byte.toml at: {}", entry.path().display()));
+                    if let Some(project_dir) = entry.path().parent() {
+                        match load_project(project_dir.to_str().unwrap_or("")) {
+                            Ok(project) => {
+                                crate::logger::info(&format!("[SCAN] Successfully loaded project: {}", project.config.project.name));
+                                projects.push(project);
+                            }
+                            Err(e) => {
+                                crate::logger::info(&format!("[SCAN] Failed to load project from {}: {}", project_dir.display(), e));
+                            }
+                        }
+                    }
                 }
+            }
+            Err(e) => {
+                crate::logger::info(&format!("[SCAN] Error reading entry: {}", e));
             }
         }
     }
+
+    crate::logger::info(&format!("[SCAN] Scanned {} entries, found {} projects", entry_count, projects.len()));
 
     Ok(projects)
 }
