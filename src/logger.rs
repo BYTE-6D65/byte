@@ -53,20 +53,12 @@ impl Logger {
 
 lazy_static::lazy_static! {
     static ref LOGGER: Logger = {
-        let cwd = env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-        eprintln!("[LOGGER DEBUG] Current dir: {:?}", cwd);
+        // Byte standard: all logs go to .byte/logs/ relative to project root
+        // This makes byte itself "byte compatible"
+        let log_dir = ".byte/logs";
 
-        let log_dir = if cwd.ends_with("target/debug") {
-            cwd.join("../../target/logs")
-        } else if cwd.ends_with("byte") {
-            cwd.join("target/logs")
-        } else {
-            cwd.join("byte/target/logs")
-        };
-
-        eprintln!("[LOGGER DEBUG] Log dir: {:?}", log_dir);
-        let logger = Logger::new(log_dir.to_str().unwrap_or("target/logs"));
-        logger.info("Logger initialized");
+        let logger = Logger::new(log_dir);
+        logger.info("Logger initialized - using .byte/logs/");
         logger
     };
 }

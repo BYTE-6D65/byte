@@ -105,6 +105,9 @@ pub fn init_project(
     fs::create_dir_all(byte_dir.join("logs"))?;
     fs::create_dir_all(byte_dir.join("state"))?;
 
+    // Create target directory for build artifacts (standard across all ecosystems)
+    fs::create_dir_all(project_path.join("target"))?;
+
     // Create byte.toml
     let config = ProjectConfig {
         project: crate::config::types::ProjectMeta {
