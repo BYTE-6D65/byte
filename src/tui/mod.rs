@@ -9,7 +9,7 @@ use ratatui::{
     layout::{Alignment, Constraint, Direction, Layout, Margin},
     style::{Modifier, Style, Color},
     text::{Line, Span},
-    widgets::{Block, BorderType, Borders, List, ListItem, ListState, Paragraph},
+    widgets::{Block, BorderType, Borders, Clear, List, ListItem, ListState, Paragraph},
 };
 use std::collections::HashMap;
 use std::io;
@@ -296,14 +296,14 @@ impl App {
                 for workspace in &mut app.workspace_directories {
                     let expanded_path = shellexpand::tilde(&workspace.path).to_string();
                     let normalized_workspace = expanded_path.trim_end_matches('/').to_lowercase();
-                    crate::logger::info(&format!(
+                    eprintln!("[INFO] {}", format!(
                         "[COUNT] Counting projects for workspace: {}",
                         expanded_path
                     ));
                     for proj in &app.projects {
                         let normalized_proj = proj.path.trim_end_matches('/').to_lowercase();
                         let matches = normalized_proj.starts_with(&normalized_workspace);
-                        crate::logger::info(&format!(
+                        eprintln!("[INFO] {}", format!(
                             "[COUNT]   Checking project: {} (starts_with? {})",
                             proj.path, matches
                         ));
@@ -316,7 +316,7 @@ impl App {
                             normalized_proj.starts_with(&normalized_workspace)
                         })
                         .count();
-                    crate::logger::info(&format!(
+                    eprintln!("[INFO] {}", format!(
                         "[COUNT] Final count for {}: {}",
                         expanded_path, workspace.project_count
                     ));
@@ -451,11 +451,11 @@ impl App {
 
         if result.success {
             self.status_message = format!("✓ {}", result.command);
-            crate::logger::info(&format!("[EXEC] Success: {}", result.command));
+            eprintln!("[INFO] {}", format!("[EXEC] Success: {}", result.command));
             self.hotload();
         } else {
             self.status_message = format!("✗ Command failed");
-            crate::logger::info(&format!("[EXEC] Failed: {}", result.command));
+            eprintln!("[INFO] {}", format!("[EXEC] Failed: {}", result.command));
         }
     }
 
@@ -469,7 +469,7 @@ impl App {
             shellexpand::tilde(&self.get_target_workspace()).to_string()
         };
 
-        crate::logger::info(&format!(
+        eprintln!("[INFO] {}", format!(
             "[EXEC] Executing: {} in {}",
             command_str, working_dir
         ));
@@ -503,13 +503,13 @@ impl App {
             let working_dir_clone = working_dir.clone();
 
             std::thread::spawn(move || {
-                use std::process::Command;
+                use crate::exec::CommandBuilder;
 
                 // Parse command to check if it's a byte init command
                 let parts: Vec<&str> = command.split_whitespace().collect();
                 let is_byte_init = parts.len() >= 4 && parts[0] == "byte" && parts[1] == "init";
 
-                let (success, stdout, stderr) = if is_byte_init {
+                let (success, _stdout, _stderr) = if is_byte_init {
                     // Handle byte init commands specially
                     let ecosystem = parts[2];
                     let project_type = parts[3];
@@ -527,44 +527,44 @@ impl App {
                     ) {
                         Ok(project_path) => {
                             let msg = format!("Created project at {}", project_path.display());
-                            crate::logger::info(&format!("[EXEC] Success: {}", msg));
+                            eprintln!("[INFO] {}", format!("[EXEC] Success: {}", msg));
                             (true, msg, String::new())
                         }
                         Err(e) => {
                             let msg = format!("Failed to create project: {}", e);
-                            crate::logger::info(&format!("[EXEC] Failed: {}", msg));
+                            eprintln!("[INFO] {}", format!("[EXEC] Failed: {}", msg));
                             (false, String::new(), msg)
                         }
                     }
                 } else {
-                    // Execute regular shell command
-                    let output = Command::new("sh")
-                        .arg("-c")
-                        .arg(&command)
-                        .current_dir(&working_dir_clone)
-                        .output();
+                    // Execute regular shell command using exec API (with validation)
+                    let result = CommandBuilder::shell(&command)
+                        .working_dir(&working_dir_clone)
+                        .execute();
 
-                    match output {
-                        Ok(output) => {
-                            let success = output.status.success();
-                            let exit_code = output.status.code().unwrap_or(-1);
-                            let stdout = String::from_utf8_lossy(&output.stdout).to_string();
-                            let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+                    match result {
+                        Ok(cmd_result) => {
+                            let success = cmd_result.success;
+                            let stdout = cmd_result.stdout.clone();
+                            let stderr = cmd_result.stderr.clone();
+                            let exit_code = cmd_result.exit_code;
 
-                            // Log command output to dedicated category directory
-                            let _ = crate::logger::log_command_output(
-                                &working_dir_clone,
-                                &command,
-                                &stdout,
-                                &stderr,
-                                exit_code,
-                            );
+                            // Log command output using FS API
+                            if let Ok(fs_api) = crate::fs::ProjectFileSystem::new(&working_dir_clone) {
+                                let _ = fs_api.write_command_log(
+                                    "other",
+                                    &command,
+                                    &stdout,
+                                    &stderr,
+                                    exit_code,
+                                );
+                            }
 
                             (success, stdout, stderr)
                         }
                         Err(e) => {
                             let msg = format!("Command execution failed: {}", e);
-                            crate::logger::info(&format!("[EXEC] Error: {}", msg));
+                            eprintln!("[INFO] {}", format!("[EXEC] Error: {}", msg));
                             (false, String::new(), msg)
                         }
                     }
@@ -759,11 +759,11 @@ impl App {
                 self.hotload();
                 self.status_message = "✓ Reloaded all state from disk".to_string();
             }
-            KeyCode::Char('f')
-                if matches!(self.current_view, View::ProjectBrowser)
+            KeyCode::Char('t')
+                if matches!(self.current_view, View::Detail)
                     && matches!(self.input_mode, InputMode::Normal) =>
             {
-                // Example: Git tag creation form
+                // Git tag creation form (from Details view with git status)
                 let form = crate::forms::Form::new("Create Git Tag")
                     .description("Create a new Git tag for this project")
                     .text_input("tag_name", "Tag Name", "v1.0.0")
@@ -877,7 +877,7 @@ impl App {
             {
                 // Preview selected log in right panel
                 if let Some(project) = self.get_selected_project() {
-                    let logs = crate::logger::get_recent_logs(&project.path, 5);
+                    let logs = crate::fs::ProjectFileSystem::new(&project.path).ok().and_then(|fs| fs.recent_logs_all(5).ok()).unwrap_or_default();
                     if let Some(log) = logs.get(self.selected_log) {
                         self.viewing_log = Some((log.path.clone(), 0)); // path, scroll_offset=0
                         self.status_message = format!("Viewing: {}", log.filename);
@@ -894,9 +894,9 @@ impl App {
             {
                 // Open selected log file in external editor
                 if let Some(project) = self.get_selected_project() {
-                    let logs = crate::logger::get_recent_logs(&project.path, 5);
+                    let logs = crate::fs::ProjectFileSystem::new(&project.path).ok().and_then(|fs| fs.recent_logs_all(5).ok()).unwrap_or_default();
                     if let Some(log) = logs.get(self.selected_log) {
-                        let editor = crate::logger::get_default_editor();
+                        let editor = crate::exec::get_default_editor();
                         let log_path = log.path.to_string_lossy().to_string();
 
                         // Set pending editor request (will be handled in main loop)
@@ -1090,7 +1090,7 @@ impl App {
                             if let Some((_path, scroll_offset)) = &mut self.viewing_log {
                                 *scroll_offset = scroll_offset.saturating_add(1);
                             } else if let Some(project) = self.get_selected_project() {
-                                let log_count = crate::logger::get_recent_logs(&project.path, 5).len();
+                                let log_count = crate::fs::ProjectFileSystem::new(&project.path).ok().and_then(|fs| fs.recent_logs_all(5).ok()).unwrap_or_default().len();
                                 if self.selected_log < log_count.saturating_sub(1) {
                                     self.selected_log += 1;
                                 }
@@ -1110,7 +1110,7 @@ impl App {
             KeyCode::PageUp => {
                 // Scroll log preview up
                 if matches!(self.current_view, View::Detail) {
-                    if let Some((path, scroll_offset)) = &mut self.viewing_log {
+                    if let Some((_path, scroll_offset)) = &mut self.viewing_log {
                         *scroll_offset = scroll_offset.saturating_sub(10);
                     }
                 }
@@ -1118,7 +1118,7 @@ impl App {
             KeyCode::PageDown => {
                 // Scroll log preview down
                 if matches!(self.current_view, View::Detail) {
-                    if let Some((path, scroll_offset)) = &mut self.viewing_log {
+                    if let Some((_path, scroll_offset)) = &mut self.viewing_log {
                         *scroll_offset = scroll_offset.saturating_add(10);
                     }
                 }
@@ -1209,7 +1209,7 @@ impl App {
                     // Submit form on Enter
                     if let Some(form) = &mut self.active_form {
                         match form.submit() {
-                            Ok(values) => {
+                            Ok(_values) => {
                                 // Form submitted successfully
                                 self.status_message = "Form submitted".to_string();
                                 // TODO: Handle form values
@@ -1293,7 +1293,7 @@ impl App {
     /// Hot reload all state from disk
     /// Called on file changes (via watcher) or manual refresh (r key)
     pub fn hotload(&mut self) {
-        crate::logger::info("[HOTLOAD] Reloading all state from disk");
+        eprintln!("[INFO] [HOTLOAD] Reloading all state from disk");
 
         // Reload config and rediscover projects
         if let Ok(config) = crate::config::Config::load() {
@@ -1372,7 +1372,7 @@ impl App {
         // Refresh project states (git status, build state)
         self.refresh_project_states();
 
-        crate::logger::info("[HOTLOAD] Reload complete");
+        eprintln!("[INFO] [HOTLOAD] Reload complete");
     }
 
     /// Categorize a command based on its command string
@@ -1521,7 +1521,7 @@ pub fn run() -> anyhow::Result<()> {
 
     // Set up file watcher
     let (file_tx, file_rx) = std::sync::mpsc::channel();
-    let mut watcher = setup_file_watcher(file_tx, &app)?;
+    let watcher = setup_file_watcher(file_tx, &app)?;
 
     // Set up command execution channel
     let (cmd_tx, cmd_rx) = std::sync::mpsc::channel();
@@ -1572,7 +1572,7 @@ fn setup_file_watcher(
                                 || path.to_string_lossy().contains(".git/index");
 
                             if should_reload {
-                                crate::logger::info(&format!(
+                                eprintln!("[INFO] {}", format!(
                                     "[WATCHER] Detected change: {:?}",
                                     path
                                 ));
@@ -1585,7 +1585,7 @@ fn setup_file_watcher(
                 }
                 Err(errors) => {
                     for error in errors {
-                        crate::logger::info(&format!("[WATCHER] Error: {:?}", error));
+                        eprintln!("[INFO] {}", format!("[WATCHER] Error: {:?}", error));
                     }
                 }
             }
@@ -1599,9 +1599,9 @@ fn setup_file_watcher(
             .watcher()
             .watch(std::path::Path::new(&expanded), RecursiveMode::Recursive)
         {
-            crate::logger::info(&format!("[WATCHER] Failed to watch {}: {}", expanded, e));
+            eprintln!("[INFO] {}", format!("[WATCHER] Failed to watch {}: {}", expanded, e));
         } else {
-            crate::logger::info(&format!("[WATCHER] Watching: {}", expanded));
+            eprintln!("[INFO] {}", format!("[WATCHER] Watching: {}", expanded));
         }
     }
 
@@ -1613,9 +1613,9 @@ fn setup_file_watcher(
                 .watcher()
                 .watch(&byte_config, RecursiveMode::NonRecursive)
             {
-                crate::logger::info(&format!("[WATCHER] Failed to watch config: {}", e));
+                eprintln!("[INFO] {}", format!("[WATCHER] Failed to watch config: {}", e));
             } else {
-                crate::logger::info(&format!("[WATCHER] Watching config: {:?}", byte_config));
+                eprintln!("[INFO] {}", format!("[WATCHER] Watching config: {:?}", byte_config));
             }
         }
     }
@@ -1644,24 +1644,20 @@ fn run_interactive_command(
     editor: &str,
     file_path: &str,
 ) -> anyhow::Result<()> {
-    use std::process::Command;
+    use crate::exec::CommandBuilder;
 
     // Suspend TUI
     restore_terminal(terminal)?;
 
-    // Run editor with inherited stdin/stdout/stderr
-    let status = Command::new(editor)
+    // Run editor with inherited stdin/stdout/stderr via exec API
+    let result = CommandBuilder::new(editor)
         .arg(file_path)
-        .status()?;
+        .execute_interactive();
 
     // Resume TUI
     *terminal = setup_terminal()?;
 
-    if !status.success() {
-        anyhow::bail!("Editor exited with error");
-    }
-
-    Ok(())
+    result
 }
 
 /// Simple fuzzy matching: all chars from needle must appear in haystack in order
@@ -2648,7 +2644,7 @@ fn render_recent_logs(project_path: &str, selected_log: usize) -> Vec<Line> {
         Style::default().fg(theme::TEXT_PRIMARY).add_modifier(Modifier::BOLD),
     )]));
 
-    let logs = crate::logger::get_recent_logs(project_path, 5);
+    let logs = crate::fs::ProjectFileSystem::new(project_path).ok().and_then(|fs| fs.recent_logs_all(5).ok()).unwrap_or_default();
 
     if logs.is_empty() {
         lines.push(Line::from(vec![Span::styled(
@@ -3096,14 +3092,17 @@ fn render_workspace_manager(f: &mut Frame, area: ratatui::layout::Rect, app: &Ap
     f.render_widget(help, chunks[3]);
 }
 
-fn render_form(f: &mut Frame, area: ratatui::layout::Rect, app: &App) {
-    let Some(form) = &app.active_form else {
-        return;
-    };
+/// Create a centered modal overlay with cleared background
+/// Returns the cleared modal area ready for content rendering
+fn create_centered_modal(
+    f: &mut Frame,
+    area: ratatui::layout::Rect,
+    width: u16,
+    height: u16,
+) -> ratatui::layout::Rect {
+    let modal_width = area.width.min(width);
+    let modal_height = area.height.min(height);
 
-    // Create centered modal overlay
-    let modal_width = area.width.min(80);
-    let modal_height = area.height.min(40);
     let modal_area = ratatui::layout::Rect {
         x: (area.width.saturating_sub(modal_width)) / 2,
         y: (area.height.saturating_sub(modal_height)) / 2,
@@ -3111,14 +3110,19 @@ fn render_form(f: &mut Frame, area: ratatui::layout::Rect, app: &App) {
         height: modal_height,
     };
 
-    // Clear entire background area
-    let background = Block::default().style(Style::default().bg(Color::Black));
-    f.render_widget(background, area);
+    // Clear the modal area to prevent background bleed
+    f.render_widget(Clear, modal_area);
 
-    // Clear modal area with black fill before rendering content
-    let modal_bg = Paragraph::new(vec![Line::from("")])
-        .style(Style::default().bg(Color::Black));
-    f.render_widget(modal_bg, modal_area);
+    modal_area
+}
+
+fn render_form(f: &mut Frame, area: ratatui::layout::Rect, app: &App) {
+    let Some(form) = &app.active_form else {
+        return;
+    };
+
+    // Create centered modal with cleared background
+    let modal_area = create_centered_modal(f, area, 80, 40);
 
     // Inner area with padding
     let inner_area = modal_area.inner(Margin {
@@ -3251,29 +3255,38 @@ fn render_form(f: &mut Frame, area: ratatui::layout::Rect, app: &App) {
                     ]));
                 }
             }
+            // Future: Number field rendering
             crate::forms::FormField::Number { value, min, max, .. } => {
-                let mut display = format!("{}", value);
+                let mut display_parts = vec![value.to_string()];
                 if let Some(min_val) = min {
-                    display.push_str(&format!(" (min: {})", min_val));
+                    if let Some(max_val) = max {
+                        display_parts.push(format!(" (range: {}-{})", min_val, max_val));
+                    } else {
+                        display_parts.push(format!(" (min: {})", min_val));
+                    }
+                } else if let Some(max_val) = max {
+                    display_parts.push(format!(" (max: {})", max_val));
                 }
-                if let Some(max_val) = max {
-                    display.push_str(&format!(" (max: {})", max_val));
-                }
+                let display = display_parts.join("");
+                let value_style = if is_current {
+                    Style::default().fg(theme::TEXT_PRIMARY).add_modifier(Modifier::UNDERLINED)
+                } else {
+                    Style::default().fg(theme::TEXT_PRIMARY)
+                };
                 field_lines.push(Line::from(vec![
                     Span::raw("     "),
-                    Span::styled(
-                        display,
-                        if is_current {
-                            Style::default().fg(theme::ACCENT)
-                        } else {
-                            Style::default().fg(theme::TEXT_PRIMARY)
-                        },
-                    ),
+                    Span::styled(display, value_style),
+                    if is_current {
+                        Span::styled("█", Style::default().fg(theme::ACCENT))
+                    } else {
+                        Span::raw("")
+                    },
                 ]));
             }
+            // Future: Select dropdown rendering
             crate::forms::FormField::Select { options, selected, .. } => {
-                for (j, option) in options.iter().enumerate() {
-                    let is_selected = j == *selected;
+                for (idx, option) in options.iter().enumerate() {
+                    let is_selected = idx == *selected;
                     let marker = if is_selected { "●" } else { "○" };
                     let style = if is_current && is_selected {
                         Style::default().fg(theme::ACCENT).add_modifier(Modifier::BOLD)
@@ -3283,31 +3296,64 @@ fn render_form(f: &mut Frame, area: ratatui::layout::Rect, app: &App) {
                         Style::default().fg(theme::TEXT_SECONDARY)
                     };
                     field_lines.push(Line::from(vec![
-                        Span::raw("       "),
+                        Span::raw("     "),
                         Span::styled(marker, style),
                         Span::raw(" "),
                         Span::styled(option, style),
                     ]));
                 }
             }
+            // Future: Multi-select checkboxes rendering
             crate::forms::FormField::MultiSelect { options, selected, .. } => {
-                for (j, option) in options.iter().enumerate() {
-                    let is_selected = selected.contains(&j);
+                for (idx, option) in options.iter().enumerate() {
+                    let is_selected = selected.contains(&idx);
                     let marker = if is_selected { "☑" } else { "☐" };
-                    let style = if is_current && is_selected {
-                        Style::default().fg(theme::ACCENT).add_modifier(Modifier::BOLD)
+                    let style = if is_current {
+                        if is_selected {
+                            Style::default().fg(theme::ACCENT).add_modifier(Modifier::BOLD)
+                        } else {
+                            Style::default().fg(theme::ACCENT)
+                        }
                     } else if is_selected {
                         Style::default().fg(theme::SUCCESS)
                     } else {
                         Style::default().fg(theme::TEXT_SECONDARY)
                     };
                     field_lines.push(Line::from(vec![
-                        Span::raw("       "),
+                        Span::raw("     "),
                         Span::styled(marker, style),
                         Span::raw(" "),
                         Span::styled(option, style),
                     ]));
                 }
+            }
+            // Future: Path picker rendering
+            crate::forms::FormField::Path { value, kind, .. } => {
+                let display = if value.is_empty() {
+                    match kind {
+                        crate::forms::PathKind::File => "Select a file...",
+                        crate::forms::PathKind::Directory => "Select a directory...",
+                        crate::forms::PathKind::Any => "Select a path...",
+                    }
+                } else {
+                    value.as_str()
+                };
+                let value_style = if value.is_empty() {
+                    Style::default().fg(theme::TEXT_SECONDARY)
+                } else if is_current {
+                    Style::default().fg(theme::TEXT_PRIMARY).add_modifier(Modifier::UNDERLINED)
+                } else {
+                    Style::default().fg(theme::TEXT_PRIMARY)
+                };
+                field_lines.push(Line::from(vec![
+                    Span::raw("     "),
+                    Span::styled(display, value_style),
+                    if is_current {
+                        Span::styled("█", Style::default().fg(theme::ACCENT))
+                    } else {
+                        Span::raw("")
+                    },
+                ]));
             }
             crate::forms::FormField::Checkbox { checked, .. } => {
                 let marker = if *checked { "☑" } else { "☐" };
@@ -3321,28 +3367,6 @@ fn render_form(f: &mut Frame, area: ratatui::layout::Rect, app: &App) {
                 field_lines.push(Line::from(vec![
                     Span::raw("     "),
                     Span::styled(marker, style),
-                ]));
-            }
-            crate::forms::FormField::Path { value, kind, .. } => {
-                let display = if value.is_empty() {
-                    format!("(select {} path)", match kind {
-                        crate::forms::PathKind::File => "file",
-                        crate::forms::PathKind::Directory => "directory",
-                        crate::forms::PathKind::Any => "any",
-                    })
-                } else {
-                    value.clone()
-                };
-                let value_style = if value.is_empty() {
-                    Style::default().fg(theme::TEXT_SECONDARY)
-                } else if is_current {
-                    Style::default().fg(theme::TEXT_PRIMARY).add_modifier(Modifier::UNDERLINED)
-                } else {
-                    Style::default().fg(theme::TEXT_PRIMARY)
-                };
-                field_lines.push(Line::from(vec![
-                    Span::raw("     "),
-                    Span::styled(display, value_style),
                 ]));
             }
         }

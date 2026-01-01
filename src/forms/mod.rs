@@ -67,6 +67,9 @@ impl Form {
         })
     }
 
+
+    /// Email input field (future feature)
+    #[allow(dead_code)]
     pub fn email(
         self,
         id: impl Into<String>,
@@ -81,6 +84,8 @@ impl Form {
         })
     }
 
+    /// Number input field (future feature)
+    #[allow(dead_code)]
     pub fn number(
         self,
         id: impl Into<String>,
@@ -98,6 +103,8 @@ impl Form {
         })
     }
 
+    /// Select dropdown (future feature)
+    #[allow(dead_code)]
     pub fn select(
         self,
         id: impl Into<String>,
@@ -112,6 +119,8 @@ impl Form {
         })
     }
 
+    /// Multi-select checkboxes (future feature)
+    #[allow(dead_code)]
     pub fn multi_select(
         self,
         id: impl Into<String>,
@@ -134,6 +143,8 @@ impl Form {
         })
     }
 
+    /// Path picker (future feature)
+    #[allow(dead_code)]
     pub fn path(
         self,
         id: impl Into<String>,
@@ -167,11 +178,6 @@ impl Form {
         self.fields.get_mut(self.current_field)
     }
 
-    /// Get current field (immutable)
-    pub fn current_field_ref(&self) -> Option<&FormField> {
-        self.fields.get(self.current_field)
-    }
-
     /// Validate all fields
     pub fn validate(&self) -> Result<(), String> {
         for field in &self.fields {
@@ -201,11 +207,6 @@ impl Form {
     pub fn cancel(&mut self) {
         self.cancelled = true;
     }
-
-    /// Check if form is done (submitted or cancelled)
-    pub fn is_done(&self) -> bool {
-        self.submitted || self.cancelled
-    }
 }
 
 /// Individual form field types
@@ -225,12 +226,16 @@ pub enum FormField {
         value: String,
         height: usize,
     },
+    // Future: Email validation
+    #[allow(dead_code)]
     Email {
         id: String,
         label: String,
         placeholder: String,
         value: String,
     },
+    // Future: Numeric input
+    #[allow(dead_code)]
     Number {
         id: String,
         label: String,
@@ -238,23 +243,29 @@ pub enum FormField {
         min: Option<i64>,
         max: Option<i64>,
     },
+    // Future: Dropdown selection
+    #[allow(dead_code)]
     Select {
         id: String,
         label: String,
         options: Vec<String>,
         selected: usize,
     },
+    // Future: Multi-select checkboxes
+    #[allow(dead_code)]
     MultiSelect {
         id: String,
         label: String,
         options: Vec<String>,
-        selected: Vec<usize>, // Indices of selected items
+        selected: Vec<usize>,
     },
     Checkbox {
         id: String,
         label: String,
         checked: bool,
     },
+    // Future: File/directory picker
+    #[allow(dead_code)]
     Path {
         id: String,
         label: String,
@@ -349,6 +360,7 @@ impl FormField {
             FormField::TextInput { value, .. } => value.push(c),
             FormField::TextArea { value, .. } => value.push(c),
             FormField::Email { value, .. } => value.push(c),
+            FormField::Path { value, .. } => value.push(c),
             _ => {}
         }
     }
@@ -365,6 +377,9 @@ impl FormField {
             FormField::Email { value, .. } => {
                 value.pop();
             }
+            FormField::Path { value, .. } => {
+                value.pop();
+            }
             _ => {}
         }
     }
@@ -376,9 +391,6 @@ impl FormField {
                 if *selected > 0 {
                     *selected -= 1;
                 }
-            }
-            FormField::MultiSelect { selected, options, .. } => {
-                // For multi-select, this could navigate cursor (not implemented yet)
             }
             FormField::Number { value, .. } => {
                 *value += 1;
@@ -395,9 +407,6 @@ impl FormField {
                 if *selected < options.len().saturating_sub(1) {
                     *selected += 1;
                 }
-            }
-            FormField::MultiSelect { selected, options, .. } => {
-                // For multi-select, this could navigate cursor (not implemented yet)
             }
             FormField::Number { value, .. } => {
                 *value -= 1;
@@ -416,7 +425,7 @@ impl FormField {
                 selected, options, ..
             } => {
                 // Toggle selection of current item (simplified - would need cursor position)
-                if selected.is_empty() {
+                if selected.is_empty() && !options.is_empty() {
                     selected.push(0);
                 } else {
                     selected.clear();
@@ -431,45 +440,24 @@ impl FormField {
 #[derive(Clone, Debug)]
 pub enum FormValue {
     Text(String),
+    // Future: Email validation
+    #[allow(dead_code)]
     Email(String),
+    // Future: Numeric values
+    #[allow(dead_code)]
     Number(i64),
     Bool(bool),
+    // Future: Path selection
+    #[allow(dead_code)]
     Path(String),
+    // Future: Multi-select
+    #[allow(dead_code)]
     List(Vec<String>),
 }
 
-impl FormValue {
-    pub fn as_str(&self) -> Option<&str> {
-        match self {
-            FormValue::Text(s) | FormValue::Email(s) | FormValue::Path(s) => Some(s),
-            _ => None,
-        }
-    }
-
-    pub fn as_number(&self) -> Option<i64> {
-        match self {
-            FormValue::Number(n) => Some(*n),
-            _ => None,
-        }
-    }
-
-    pub fn as_bool(&self) -> Option<bool> {
-        match self {
-            FormValue::Bool(b) => Some(*b),
-            _ => None,
-        }
-    }
-
-    pub fn as_list(&self) -> Option<&[String]> {
-        match self {
-            FormValue::List(list) => Some(list),
-            _ => None,
-        }
-    }
-}
-
-/// Path field kind
+/// Path field kind (future feature)
 #[derive(Clone, Copy, Debug, PartialEq)]
+#[allow(dead_code)]
 pub enum PathKind {
     File,
     Directory,

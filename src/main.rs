@@ -1,22 +1,21 @@
 mod cli;
 mod config;
+mod exec;
 mod forms;
-mod logger;
+mod fs;
 mod projects;
 mod state;
 mod tui;
 
 fn main() {
-    eprintln!("[MAIN] Byte starting...");
-    logger::info("Byte starting...");
+    eprintln!("[INFO] Byte starting...");
 
     if let Err(e) = run() {
-        logger::error(&format!("Error: {}", e));
+        eprintln!("[ERROR] Error: {}", e);
         std::process::exit(1);
     }
 
-    logger::info("Byte completed");
-    eprintln!("[MAIN] Byte completed");
+    eprintln!("[INFO] Byte completed");
 }
 
 fn run() -> anyhow::Result<()> {

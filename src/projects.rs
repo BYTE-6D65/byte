@@ -19,37 +19,37 @@ pub fn discover_projects(global_config: &GlobalConfig) -> Result<Vec<DiscoveredP
     // Scan workspace if auto_scan is enabled
     if global_config.workspace.auto_scan {
         let workspace_path = shellexpand::tilde(&global_config.workspace.path).to_string();
-        crate::logger::info(&format!(
+        eprintln!("[INFO] {}", format!(
             "[DISCOVERY] Scanning primary workspace: {}",
             workspace_path
         ));
         if let Ok(workspace_projects) = scan_directory(&workspace_path) {
-            crate::logger::info(&format!(
+            eprintln!("[INFO] {}", format!(
                 "[DISCOVERY] Found {} projects in primary workspace",
                 workspace_projects.len()
             ));
             projects.extend(workspace_projects);
         } else {
-            crate::logger::info("[DISCOVERY] Failed to scan primary workspace");
+            eprintln!("[INFO] [DISCOVERY] Failed to scan primary workspace");
         }
     }
 
     // Scan manually registered directories for projects
     for registered_path in &global_config.workspace.registered {
         let expanded_path = shellexpand::tilde(registered_path).to_string();
-        crate::logger::info(&format!(
+        eprintln!("[INFO] {}", format!(
             "[DISCOVERY] Scanning registered path: {}",
             expanded_path
         ));
         match scan_directory(&expanded_path) {
             Ok(registered_projects) => {
-                crate::logger::info(&format!(
+                eprintln!("[INFO] {}", format!(
                     "[DISCOVERY] Found {} projects in {}",
                     registered_projects.len(),
                     expanded_path
                 ));
                 for proj in &registered_projects {
-                    crate::logger::info(&format!(
+                    eprintln!("[INFO] {}", format!(
                         "[DISCOVERY]   - {} at {}",
                         proj.config.project.name,
                         proj.path.display()
@@ -58,7 +58,7 @@ pub fn discover_projects(global_config: &GlobalConfig) -> Result<Vec<DiscoveredP
                 projects.extend(registered_projects);
             }
             Err(e) => {
-                crate::logger::info(&format!(
+                eprintln!("[INFO] {}", format!(
                     "[DISCOVERY] Failed to scan {}: {}",
                     expanded_path, e
                 ));
@@ -66,7 +66,7 @@ pub fn discover_projects(global_config: &GlobalConfig) -> Result<Vec<DiscoveredP
         }
     }
 
-    crate::logger::info(&format!(
+    eprintln!("[INFO] {}", format!(
         "[DISCOVERY] Total projects discovered: {}",
         projects.len()
     ));
@@ -78,10 +78,10 @@ fn scan_directory(path: &str) -> Result<Vec<DiscoveredProject>> {
     let mut projects = Vec::new();
     let path = Path::new(path);
 
-    crate::logger::info(&format!("[SCAN] Scanning directory: {}", path.display()));
+    eprintln!("[INFO] {}", format!("[SCAN] Scanning directory: {}", path.display()));
 
     if !path.exists() {
-        crate::logger::info(&format!("[SCAN] Path does not exist: {}", path.display()));
+        eprintln!("[INFO] {}", format!("[SCAN] Path does not exist: {}", path.display()));
         return Ok(projects);
     }
 
@@ -96,21 +96,21 @@ fn scan_directory(path: &str) -> Result<Vec<DiscoveredProject>> {
                 entry_count += 1;
                 let file_name = entry.file_name().to_string_lossy();
                 if file_name == "byte.toml" {
-                    crate::logger::info(&format!(
+                    eprintln!("[INFO] {}", format!(
                         "[SCAN] Found byte.toml at: {}",
                         entry.path().display()
                     ));
                     if let Some(project_dir) = entry.path().parent() {
                         match load_project(project_dir.to_str().unwrap_or("")) {
                             Ok(project) => {
-                                crate::logger::info(&format!(
+                                eprintln!("[INFO] {}", format!(
                                     "[SCAN] Successfully loaded project: {}",
                                     project.config.project.name
                                 ));
                                 projects.push(project);
                             }
                             Err(e) => {
-                                crate::logger::info(&format!(
+                                eprintln!("[INFO] {}", format!(
                                     "[SCAN] Failed to load project from {}: {}",
                                     project_dir.display(),
                                     e
@@ -121,12 +121,12 @@ fn scan_directory(path: &str) -> Result<Vec<DiscoveredProject>> {
                 }
             }
             Err(e) => {
-                crate::logger::info(&format!("[SCAN] Error reading entry: {}", e));
+                eprintln!("[INFO] {}", format!("[SCAN] Error reading entry: {}", e));
             }
         }
     }
 
-    crate::logger::info(&format!(
+    eprintln!("[INFO] {}", format!(
         "[SCAN] Scanned {} entries, found {} projects",
         entry_count,
         projects.len()
@@ -149,7 +149,7 @@ fn load_project(path: &str) -> Result<DiscoveredProject> {
     })
 }
 
-/// Initialize a new project
+/// Initialize a new project using the FS and Exec APIs
 pub fn init_project(
     workspace_path: &str,
     ecosystem: &str,
@@ -176,41 +176,9 @@ pub fn init_project(
 
     fs::create_dir_all(&project_path)?;
 
-    // Create .byte directory structure
-    let byte_dir = project_path.join(".byte");
-    fs::create_dir_all(byte_dir.join("logs"))?;
-    fs::create_dir_all(byte_dir.join("state"))?;
-
-    // Create target directory for build artifacts (standard across all ecosystems)
-    fs::create_dir_all(project_path.join("target"))?;
-
-    // Create byte.toml
-    let config = ProjectConfig {
-        project: crate::config::types::ProjectMeta {
-            name: name.to_string(),
-            project_type: project_type.to_string(),
-            ecosystem: ecosystem.to_string(),
-            description: None,
-        },
-        build: None,
-        commands: None,
-    };
-
-    let config_toml = toml::to_string_pretty(&config)?;
-    fs::write(project_path.join("byte.toml"), config_toml)?;
-
-    // Run ecosystem-specific setup
-    match ecosystem {
-        "go" => init_go_project(&project_path, name)?,
-        "bun" => init_bun_project(&project_path, name)?,
-        "rust" => init_rust_project(&project_path, name)?,
-        _ => {
-            eprintln!("Warning: No driver found for ecosystem '{}'", ecosystem);
-        }
-    }
-
-    // Add .byte/ to .gitignore
-    add_to_gitignore(&project_path)?;
+    // Use FS API to initialize project structure
+    let fs_api = crate::fs::ProjectFileSystem::new(&project_path)?;
+    fs_api.init_project(ecosystem, project_type, name)?;
 
     // Initialize git repository
     init_git_repo(&project_path, name)?;
@@ -218,115 +186,28 @@ pub fn init_project(
     Ok(project_path)
 }
 
-/// Add .byte/ to .gitignore (or create .gitignore if it doesn't exist)
-fn add_to_gitignore(project_path: &Path) -> Result<()> {
-    let gitignore_path = project_path.join(".gitignore");
-
-    let byte_entry = "\n# Byte runtime data\n.byte/\n";
-
-    if gitignore_path.exists() {
-        let content = fs::read_to_string(&gitignore_path)?;
-        if !content.contains(".byte/") {
-            fs::write(&gitignore_path, format!("{}{}", content, byte_entry))?;
-        }
-    } else {
-        fs::write(&gitignore_path, byte_entry)?;
-    }
-
-    Ok(())
-}
-
-/// Initialize Go project
-fn init_go_project(project_path: &Path, name: &str) -> Result<()> {
-    use std::process::Command;
-
-    // Create basic structure
-    fs::create_dir_all(project_path.join("cmd").join(name))?;
-    fs::create_dir_all(project_path.join("internal"))?;
-    fs::create_dir_all(project_path.join("pkg"))?;
-
-    // Initialize go module
-    Command::new("go")
-        .args(&["mod", "init", name])
-        .current_dir(project_path)
-        .output()?;
-
-    // Create main.go
-    let main_go = format!(
-        r#"package main
-
-import "fmt"
-
-func main() {{
-    fmt.Println("Hello from {}!")
-}}
-"#,
-        name
-    );
-    fs::write(project_path.join("cmd").join(name).join("main.go"), main_go)?;
-
-    Ok(())
-}
-
-/// Initialize Bun project
-fn init_bun_project(project_path: &Path, name: &str) -> Result<()> {
-    use std::process::Command;
-
-    // Create basic structure
-    fs::create_dir_all(project_path.join("src"))?;
-
-    // Initialize package.json
-    Command::new("bun")
-        .args(&["init", "-y"])
-        .current_dir(project_path)
-        .output()?;
-
-    // Create index.ts
-    let index_ts = format!(
-        r#"console.log("Hello from {}!");
-"#,
-        name
-    );
-    fs::write(project_path.join("src").join("index.ts"), index_ts)?;
-
-    Ok(())
-}
-
-/// Initialize Rust project
-fn init_rust_project(project_path: &Path, name: &str) -> Result<()> {
-    use std::process::Command;
-
-    // Use cargo init
-    Command::new("cargo")
-        .args(&["init", "--name", name])
-        .current_dir(project_path)
-        .output()?;
-
-    Ok(())
-}
-
-/// Initialize git repository with initial commit
+/// Initialize git repository with initial commit using Exec API
 fn init_git_repo(project_path: &Path, name: &str) -> Result<()> {
-    use std::process::Command;
+    use crate::exec::CommandBuilder;
 
     // Initialize git repository
-    Command::new("git")
-        .arg("init")
-        .current_dir(project_path)
-        .output()?;
+    CommandBuilder::git("init")
+        .working_dir(project_path)
+        .execute()?;
 
     // Stage all files
-    Command::new("git")
-        .args(&["add", "."])
-        .current_dir(project_path)
-        .output()?;
+    CommandBuilder::git("add")
+        .arg(".")
+        .working_dir(project_path)
+        .execute()?;
 
     // Create initial commit
     let commit_message = format!("Initial commit: {} project", name);
-    Command::new("git")
-        .args(&["commit", "-m", &commit_message])
-        .current_dir(project_path)
-        .output()?;
+    CommandBuilder::git("commit")
+        .arg("-m")
+        .arg(&commit_message)
+        .working_dir(project_path)
+        .execute()?;
 
     Ok(())
 }

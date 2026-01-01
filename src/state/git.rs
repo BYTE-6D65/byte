@@ -1,5 +1,4 @@
 use std::path::PathBuf;
-use std::process::Command;
 
 /// Git repository status
 #[derive(Debug, Clone)]
@@ -74,15 +73,19 @@ pub fn get_git_status(project_path: &str) -> GitStatus {
     }
 }
 
-/// Run git status command and capture output
+/// Run git status command and capture output using exec API
 fn run_git_status_command(project_path: &str) -> Result<String, std::io::Error> {
-    let output = Command::new("git")
-        .args(&["status", "--porcelain=v1", "--branch"])
-        .current_dir(project_path)
-        .output()?;
+    use crate::exec::CommandBuilder;
 
-    if output.status.success() {
-        Ok(String::from_utf8_lossy(&output.stdout).to_string())
+    let result = CommandBuilder::git("status")
+        .arg("--porcelain=v1")
+        .arg("--branch")
+        .working_dir(project_path)
+        .execute()
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e.to_string()))?;
+
+    if result.success {
+        Ok(result.stdout)
     } else {
         Err(std::io::Error::new(
             std::io::ErrorKind::Other,

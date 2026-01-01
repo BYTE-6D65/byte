@@ -8,15 +8,13 @@ pub use types::{GlobalConfig, ProjectConfig};
 
 pub struct Config {
     pub global: GlobalConfig,
-    pub project: Option<ProjectConfig>,
 }
 
 impl Config {
     pub fn load() -> Result<Self> {
         let global = Self::load_global_config()?;
-        let project = Self::load_project_config().ok();
 
-        Ok(Self { global, project })
+        Ok(Self { global })
     }
 
     fn load_global_config() -> Result<GlobalConfig> {
@@ -40,17 +38,6 @@ impl Config {
         Ok(GlobalConfig::default())
     }
 
-    fn load_project_config() -> Result<ProjectConfig> {
-        let path = PathBuf::from("byte.toml.example");
-        if path.exists() {
-            let content = fs::read_to_string(&path)?;
-            let config: ProjectConfig = toml::from_str(&content)
-                .map_err(|e| anyhow::anyhow!("Failed to parse project config TOML: {}", e))?;
-            Ok(config)
-        } else {
-            Err(anyhow::anyhow!("Project config not found"))
-        }
-    }
 
     /// Save global config to ~/.config/byte/config.toml
     pub fn save(&self) -> Result<()> {
@@ -146,7 +133,6 @@ impl Default for Config {
     fn default() -> Self {
         Self {
             global: GlobalConfig::default(),
-            project: None,
         }
     }
 }
