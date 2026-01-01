@@ -1,5 +1,6 @@
 pub mod cli;
 pub mod config;
+pub mod forms;
 pub mod logger;
 pub mod projects;
 pub mod state;

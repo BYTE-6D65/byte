@@ -1,1 +1,28 @@
+# Rust
 /target
+Cargo.lock
+
+# Byte runtime data
+.byte/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Test artifacts
+*.profraw
+*.profdata
+
+# Logs
+*.log
+
+# Temporary files
+tmp/
+temp/

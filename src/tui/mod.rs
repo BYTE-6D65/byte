@@ -7,9 +7,9 @@ use ratatui::{
     Frame, Terminal,
     backend::CrosstermBackend,
     layout::{Alignment, Constraint, Direction, Layout, Margin},
-    style::{Modifier, Style},
+    style::{Modifier, Style, Color},
     text::{Line, Span},
-    widgets::{Block, Borders, List, ListItem, ListState, Paragraph},
+    widgets::{Block, BorderType, Borders, List, ListItem, ListState, Paragraph},
 };
 use std::collections::HashMap;
 use std::io;
@@ -60,6 +60,62 @@ pub struct WorkspaceDir {
     pub project_count: usize,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum CommandFilter {
+    All,
+    Build,
+    Lint,
+    Git,
+    Test,
+    Other,
+}
+
+impl CommandFilter {
+    pub fn as_str(&self) -> &str {
+        match self {
+            CommandFilter::All => "All",
+            CommandFilter::Build => "Build",
+            CommandFilter::Lint => "Lint",
+            CommandFilter::Git => "Git",
+            CommandFilter::Test => "Test",
+            CommandFilter::Other => "Other",
+        }
+    }
+
+    pub fn all_filters() -> Vec<CommandFilter> {
+        vec![
+            CommandFilter::All,
+            CommandFilter::Build,
+            CommandFilter::Lint,
+            CommandFilter::Git,
+            CommandFilter::Test,
+            CommandFilter::Other,
+        ]
+    }
+
+    pub fn next(&self) -> CommandFilter {
+        match self {
+            CommandFilter::All => CommandFilter::Build,
+            CommandFilter::Build => CommandFilter::Lint,
+            CommandFilter::Lint => CommandFilter::Git,
+            CommandFilter::Git => CommandFilter::Test,
+            CommandFilter::Test => CommandFilter::Other,
+            CommandFilter::Other => CommandFilter::All,
+        }
+    }
+
+    pub fn prev(&self) -> CommandFilter {
+        match self {
+            CommandFilter::All => CommandFilter::Other,
+            CommandFilter::Build => CommandFilter::All,
+            CommandFilter::Lint => CommandFilter::Build,
+            CommandFilter::Git => CommandFilter::Lint,
+            CommandFilter::Test => CommandFilter::Git,
+            CommandFilter::Other => CommandFilter::Test,
+        }
+    }
+}
+
 pub enum InputMode {
     Normal,
     AddingDirectory,
@@ -71,6 +127,7 @@ pub struct App {
     pub current_view: View,
     pub projects: Vec<Project>,
     pub commands: Vec<Command>,
+    pub command_filter: CommandFilter, // Active filter for commands view
     pub selected_project: usize,
     pub selected_command: usize,
     pub project_list_state: ListState,
@@ -108,6 +165,8 @@ pub struct App {
     pub viewing_log: Option<(PathBuf, usize)>, // (path, scroll_offset)
     // Flag to trigger terminal clear on next draw
     pub needs_clear: bool,
+    // Active form (for user input collection)
+    pub active_form: Option<crate::forms::Form>,
 }
 
 pub enum View {
@@ -115,6 +174,7 @@ pub enum View {
     CommandPalette,
     Detail,
     WorkspaceManager,
+    Form, // Form input view
 }
 
 #[derive(Clone)]
@@ -149,6 +209,7 @@ impl Default for App {
                     command: "byte init rust cli my-tool".to_string(),
                 },
             ],
+            command_filter: CommandFilter::All,
             selected_project: 0,
             selected_command: 0,
             project_list_state: ListState::default(),
@@ -179,6 +240,7 @@ impl Default for App {
             selected_log: 0,
             viewing_log: None,
             needs_clear: false,
+            active_form: None,
         };
 
         if !app.projects.is_empty() {
@@ -697,17 +759,42 @@ impl App {
                 self.hotload();
                 self.status_message = "✓ Reloaded all state from disk".to_string();
             }
-            // View switching keys - only when NOT in input mode
-            KeyCode::Char('1') if !matches!(self.input_mode, InputMode::AddingDirectory) => {
+            KeyCode::Char('f')
+                if matches!(self.current_view, View::ProjectBrowser)
+                    && matches!(self.input_mode, InputMode::Normal) =>
+            {
+                // Example: Git tag creation form
+                let form = crate::forms::Form::new("Create Git Tag")
+                    .description("Create a new Git tag for this project")
+                    .text_input("tag_name", "Tag Name", "v1.0.0")
+                    .text_area("message", "Tag Message", "Release notes...", 4)
+                    .checkbox("annotated", "Create annotated tag")
+                    .checkbox("push", "Push tag to remote");
+
+                self.active_form = Some(form);
+                self.current_view = View::Form;
+                self.status_message = "Editing form - press Enter to submit, Esc to cancel".to_string();
+            }
+            // View switching keys - only when NOT in input mode or Form view
+            KeyCode::Char('1')
+                if !matches!(self.input_mode, InputMode::AddingDirectory)
+                && !matches!(self.current_view, View::Form) =>
+            {
                 self.current_view = View::ProjectBrowser;
                 self.status_message = "Viewing projects".to_string();
             }
-            KeyCode::Char('2') if !matches!(self.input_mode, InputMode::AddingDirectory) => {
+            KeyCode::Char('2')
+                if !matches!(self.input_mode, InputMode::AddingDirectory)
+                && !matches!(self.current_view, View::Form) =>
+            {
                 self.current_view = View::CommandPalette;
                 self.update_commands();
                 self.status_message = "Viewing commands".to_string();
             }
-            KeyCode::Char('3') if !matches!(self.input_mode, InputMode::AddingDirectory) => {
+            KeyCode::Char('3')
+                if !matches!(self.input_mode, InputMode::AddingDirectory)
+                && !matches!(self.current_view, View::Form) =>
+            {
                 self.current_view = View::Detail;
                 self.selected_log = 0; // Reset log selection
                 self.status_message = format!(
@@ -718,7 +805,10 @@ impl App {
                         .unwrap_or("unknown")
                 );
             }
-            KeyCode::Char('4') if !matches!(self.input_mode, InputMode::AddingDirectory) => {
+            KeyCode::Char('4')
+                if !matches!(self.input_mode, InputMode::AddingDirectory)
+                && !matches!(self.current_view, View::Form) =>
+            {
                 self.current_view = View::WorkspaceManager;
                 self.status_message = "Managing workspace directories".to_string();
             }
@@ -837,6 +927,15 @@ impl App {
                 self.editing_workspace_index = None;
                 self.status_message = "Cancelled".to_string();
             }
+            KeyCode::Esc if matches!(self.current_view, View::Form) => {
+                // Cancel form
+                if let Some(form) = &mut self.active_form {
+                    form.cancel();
+                    self.active_form = None;
+                    self.current_view = View::ProjectBrowser;
+                    self.status_message = "Form cancelled".to_string();
+                }
+            }
             KeyCode::Backspace
                 if matches!(
                     self.input_mode,
@@ -847,6 +946,14 @@ impl App {
                 if matches!(self.input_mode, InputMode::AddingDirectory) {
                     self.fuzzy_browsing = false;
                     self.update_fuzzy_matches();
+                }
+            }
+            KeyCode::Backspace if matches!(self.current_view, View::Form) => {
+                // Handle backspace in form fields
+                if let Some(form) = &mut self.active_form {
+                    if let Some(field) = form.current_field_mut() {
+                        field.handle_backspace();
+                    }
                 }
             }
             KeyCode::Tab if matches!(self.input_mode, InputMode::AddingDirectory) => {
@@ -877,6 +984,14 @@ impl App {
                 if matches!(self.input_mode, InputMode::AddingDirectory) {
                     self.fuzzy_browsing = false;
                     self.update_fuzzy_matches();
+                }
+            }
+            KeyCode::Char(c) if matches!(self.current_view, View::Form) && c != ' ' => {
+                // Handle character input in form fields (space is handled separately)
+                if let Some(form) = &mut self.active_form {
+                    if let Some(field) = form.current_field_mut() {
+                        field.handle_char(c);
+                    }
                 }
             }
             KeyCode::Up => {
@@ -917,6 +1032,14 @@ impl App {
                                 *scroll_offset = scroll_offset.saturating_sub(1);
                             } else if self.selected_log > 0 {
                                 self.selected_log -= 1;
+                            }
+                        }
+                        View::Form => {
+                            // Handle up in form field
+                            if let Some(form) = &mut self.active_form {
+                                if let Some(field) = form.current_field_mut() {
+                                    field.handle_up();
+                                }
                             }
                         }
                     }
@@ -973,6 +1096,14 @@ impl App {
                                 }
                             }
                         }
+                        View::Form => {
+                            // Handle down in form field
+                            if let Some(form) = &mut self.active_form {
+                                if let Some(field) = form.current_field_mut() {
+                                    field.handle_down();
+                                }
+                            }
+                        }
                     }
                 }
             }
@@ -990,6 +1121,26 @@ impl App {
                     if let Some((path, scroll_offset)) = &mut self.viewing_log {
                         *scroll_offset = scroll_offset.saturating_add(10);
                     }
+                }
+            }
+            KeyCode::Left => {
+                // Navigate command filter tabs (only in CommandPalette view)
+                if matches!(self.current_view, View::CommandPalette)
+                    && matches!(self.input_mode, InputMode::Normal)
+                {
+                    self.command_filter = self.command_filter.prev();
+                    self.update_commands();
+                    self.status_message = format!("Filter: {}", self.command_filter.as_str());
+                }
+            }
+            KeyCode::Right => {
+                // Navigate command filter tabs (only in CommandPalette view)
+                if matches!(self.current_view, View::CommandPalette)
+                    && matches!(self.input_mode, InputMode::Normal)
+                {
+                    self.command_filter = self.command_filter.next();
+                    self.update_commands();
+                    self.status_message = format!("Filter: {}", self.command_filter.as_str());
                 }
             }
             KeyCode::Enter => match self.current_view {
@@ -1054,7 +1205,48 @@ impl App {
                     }
                 }
                 View::Detail => {}
+                View::Form => {
+                    // Submit form on Enter
+                    if let Some(form) = &mut self.active_form {
+                        match form.submit() {
+                            Ok(values) => {
+                                // Form submitted successfully
+                                self.status_message = "Form submitted".to_string();
+                                // TODO: Handle form values
+                                self.active_form = None;
+                                self.current_view = View::ProjectBrowser;
+                            }
+                            Err(err) => {
+                                self.status_message = format!("Validation error: {}", err);
+                            }
+                        }
+                    }
+                }
             },
+            KeyCode::Tab => {
+                // Tab to next field in forms
+                if matches!(self.current_view, View::Form) {
+                    if let Some(form) = &mut self.active_form {
+                        form.next_field();
+                    }
+                }
+            }
+            KeyCode::BackTab => {
+                // Shift+Tab to previous field in forms
+                if matches!(self.current_view, View::Form) {
+                    if let Some(form) = &mut self.active_form {
+                        form.prev_field();
+                    }
+                }
+            }
+            KeyCode::Char(' ') if matches!(self.current_view, View::Form) => {
+                // Space to toggle checkboxes/multi-select
+                if let Some(form) = &mut self.active_form {
+                    if let Some(field) = form.current_field_mut() {
+                        field.handle_space();
+                    }
+                }
+            }
             KeyCode::Char('?') => {
                 self.status_message =
                     "Press 1-3 for views, ↑↓ to navigate, Enter to select, q to quit".to_string();
@@ -1183,6 +1375,41 @@ impl App {
         crate::logger::info("[HOTLOAD] Reload complete");
     }
 
+    /// Categorize a command based on its command string
+    fn categorize_command(command: &str) -> CommandFilter {
+        let cmd_lower = command.to_lowercase();
+
+        if cmd_lower.contains("cargo build")
+            || cmd_lower.contains("cargo run")
+            || cmd_lower.contains("cargo check")
+            || cmd_lower.contains("go build")
+            || cmd_lower.contains("bun build")
+            || cmd_lower.contains("npm run build")
+            || cmd_lower.contains("make")
+        {
+            CommandFilter::Build
+        } else if cmd_lower.contains("cargo test")
+            || cmd_lower.contains("go test")
+            || cmd_lower.contains("npm test")
+            || cmd_lower.contains("bun test")
+            || cmd_lower.contains("pytest")
+        {
+            CommandFilter::Test
+        } else if cmd_lower.contains("cargo clippy")
+            || cmd_lower.contains("cargo fmt")
+            || cmd_lower.contains("eslint")
+            || cmd_lower.contains("prettier")
+            || cmd_lower.contains("gofmt")
+            || cmd_lower.contains("rustfmt")
+        {
+            CommandFilter::Lint
+        } else if cmd_lower.starts_with("git ") {
+            CommandFilter::Git
+        } else {
+            CommandFilter::Other
+        }
+    }
+
     pub fn update_commands(&mut self) {
         // Save current selection
         let previous_selection = self.selected_command;
@@ -1198,6 +1425,13 @@ impl App {
         } else {
             // No project selected: show init commands
             self.load_init_commands();
+        }
+
+        // Filter commands based on active filter
+        if self.command_filter != CommandFilter::All {
+            self.commands.retain(|cmd| {
+                Self::categorize_command(&cmd.command) == self.command_filter
+            });
         }
 
         // Preserve selection if still valid, otherwise reset to 0
@@ -1698,6 +1932,7 @@ fn ui(f: &mut Frame, app: &App) {
         View::CommandPalette => render_command_palette(f, chunks[2], app),
         View::Detail => render_detail(f, chunks[2], app),
         View::WorkspaceManager => render_workspace_manager(f, chunks[2], app),
+        View::Form => render_form(f, chunks[2], app),
     }
 
     // Footer
@@ -1715,6 +1950,7 @@ fn render_tab_bar(f: &mut Frame, area: ratatui::layout::Rect, app: &App) {
         View::CommandPalette => 1,
         View::Detail => 2,
         View::WorkspaceManager => 3,
+        View::Form => 99, // Form is a modal, not a tab
     };
 
     let tabs = vec![
@@ -1939,16 +2175,61 @@ fn render_command_palette(f: &mut Frame, area: ratatui::layout::Rect, app: &App)
         vertical: 1,
     });
 
-    // Split into command list and preview
+    // Split into tab bar, command list, and preview
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
+            Constraint::Length(1), // Filter tabs
             Constraint::Length(2), // Title
             Constraint::Min(8),    // Command list
             Constraint::Length(1), // Separator
             Constraint::Length(6), // Preview
         ])
         .split(inner_area);
+
+    // Filter tabs (horizontal bar)
+    let tab_spans: Vec<Span> = CommandFilter::all_filters()
+        .into_iter()
+        .flat_map(|filter| {
+            let is_active = filter == app.command_filter;
+            vec![
+                Span::styled(
+                    "[",
+                    Style::default().fg(if is_active {
+                        theme::ACCENT
+                    } else {
+                        theme::TEXT_SECONDARY
+                    }),
+                ),
+                Span::styled(
+                    filter.as_str().to_string(),
+                    Style::default()
+                        .fg(if is_active {
+                            theme::ACCENT
+                        } else {
+                            theme::TEXT_SECONDARY
+                        })
+                        .add_modifier(if is_active {
+                            Modifier::BOLD
+                        } else {
+                            Modifier::empty()
+                        }),
+                ),
+                Span::styled(
+                    "]",
+                    Style::default().fg(if is_active {
+                        theme::ACCENT
+                    } else {
+                        theme::TEXT_SECONDARY
+                    }),
+                ),
+                Span::raw(" "),
+            ]
+        })
+        .collect();
+
+    let tabs = Paragraph::new(Line::from(tab_spans));
+    f.render_widget(tabs, chunks[0]);
 
     // Title
     let title = Paragraph::new(vec![
@@ -1967,7 +2248,7 @@ fn render_command_palette(f: &mut Frame, area: ratatui::layout::Rect, app: &App)
         ]),
         Line::from(""),
     ]);
-    f.render_widget(title, chunks[0]);
+    f.render_widget(title, chunks[1]);
 
     // Command list with table layout: Command (left) | Target (right)
     let items: Vec<ListItem> = app
@@ -2039,14 +2320,14 @@ fn render_command_palette(f: &mut Frame, area: ratatui::layout::Rect, app: &App)
         .highlight_symbol("▸ ");
 
     let mut state = app.command_list_state.clone();
-    f.render_stateful_widget(list, chunks[1], &mut state);
+    f.render_stateful_widget(list, chunks[2], &mut state);
 
     // Separator
     let separator = Paragraph::new(Line::from(vec![Span::styled(
         "─".repeat(inner_area.width as usize),
         Style::default().fg(theme::SEPARATOR),
     )]));
-    f.render_widget(separator, chunks[2]);
+    f.render_widget(separator, chunks[3]);
 
     // Preview or Edit Mode
     if matches!(app.input_mode, InputMode::EditingCommand) {
@@ -2080,7 +2361,7 @@ fn render_command_palette(f: &mut Frame, area: ratatui::layout::Rect, app: &App)
                 Span::styled(" cancel", Style::default().fg(theme::TEXT_SECONDARY)),
             ]),
         ]);
-        f.render_widget(edit_ui, chunks[3]);
+        f.render_widget(edit_ui, chunks[4]);
     } else if let Some(cmd) = app.get_selected_command() {
         // Preview mode
         let preview = Paragraph::new(vec![
@@ -2105,7 +2386,7 @@ fn render_command_palette(f: &mut Frame, area: ratatui::layout::Rect, app: &App)
                 ),
             ]),
         ]);
-        f.render_widget(preview, chunks[3]);
+        f.render_widget(preview, chunks[4]);
     }
 }
 
@@ -2813,6 +3094,287 @@ fn render_workspace_manager(f: &mut Frame, area: ratatui::layout::Rect, app: &Ap
         ])
     };
     f.render_widget(help, chunks[3]);
+}
+
+fn render_form(f: &mut Frame, area: ratatui::layout::Rect, app: &App) {
+    let Some(form) = &app.active_form else {
+        return;
+    };
+
+    // Create centered modal overlay
+    let modal_width = area.width.min(80);
+    let modal_height = area.height.min(40);
+    let modal_area = ratatui::layout::Rect {
+        x: (area.width.saturating_sub(modal_width)) / 2,
+        y: (area.height.saturating_sub(modal_height)) / 2,
+        width: modal_width,
+        height: modal_height,
+    };
+
+    // Clear entire background area
+    let background = Block::default().style(Style::default().bg(Color::Black));
+    f.render_widget(background, area);
+
+    // Clear modal area with black fill before rendering content
+    let modal_bg = Paragraph::new(vec![Line::from("")])
+        .style(Style::default().bg(Color::Black));
+    f.render_widget(modal_bg, modal_area);
+
+    // Inner area with padding
+    let inner_area = modal_area.inner(Margin {
+        horizontal: 2,
+        vertical: 1,
+    });
+
+    // Split into sections: title, description, fields, help
+    let mut constraints = vec![
+        Constraint::Length(2), // Title
+    ];
+    if form.description.is_some() {
+        constraints.push(Constraint::Length(2)); // Description
+    }
+    constraints.push(Constraint::Min(0)); // Fields
+    constraints.push(Constraint::Length(3)); // Help text
+
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints(constraints)
+        .split(inner_area);
+
+    let mut chunk_idx = 0;
+
+    // Render title with background fill
+    let title = Paragraph::new(vec![Line::from(vec![Span::styled(
+        &form.title,
+        Style::default()
+            .fg(theme::ACCENT)
+            .add_modifier(Modifier::BOLD),
+    )])])
+    .style(Style::default().bg(Color::Black))
+    .block(
+        Block::default()
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(theme::ACCENT))
+            .border_type(BorderType::Rounded)
+            .style(Style::default().bg(Color::Black)),
+    );
+    f.render_widget(title, modal_area);
+    chunk_idx += 1;
+
+    // Render description if present
+    if let Some(desc) = &form.description {
+        let description = Paragraph::new(vec![Line::from(vec![Span::styled(
+            desc,
+            Style::default().fg(theme::TEXT_SECONDARY),
+        )])])
+        .style(Style::default().bg(Color::Black));
+        f.render_widget(description, chunks[chunk_idx]);
+        chunk_idx += 1;
+    }
+
+    // Render fields
+    let fields_area = chunks[chunk_idx];
+    let mut field_lines = Vec::new();
+
+    for (i, field) in form.fields.iter().enumerate() {
+        let is_current = i == form.current_field;
+        let label = field.label();
+
+        // Add spacing between fields
+        if i > 0 {
+            field_lines.push(Line::from(""));
+        }
+
+        // Render field label
+        let label_style = if is_current {
+            Style::default()
+                .fg(theme::ACCENT)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(theme::TEXT_PRIMARY)
+        };
+
+        field_lines.push(Line::from(vec![
+            Span::raw("  "),
+            Span::styled(if is_current { "▶ " } else { "  " }, label_style),
+            Span::styled(label, label_style),
+        ]));
+
+        // Render field value based on type
+        match field {
+            crate::forms::FormField::TextInput { value, placeholder, .. }
+            | crate::forms::FormField::Email { value, placeholder, .. } => {
+                let display = if value.is_empty() {
+                    placeholder.as_str()
+                } else {
+                    value.as_str()
+                };
+                let value_style = if value.is_empty() {
+                    Style::default().fg(theme::TEXT_SECONDARY)
+                } else if is_current {
+                    Style::default().fg(theme::TEXT_PRIMARY).add_modifier(Modifier::UNDERLINED)
+                } else {
+                    Style::default().fg(theme::TEXT_PRIMARY)
+                };
+                field_lines.push(Line::from(vec![
+                    Span::raw("     "),
+                    Span::styled(display, value_style),
+                    if is_current {
+                        Span::styled("█", Style::default().fg(theme::ACCENT))
+                    } else {
+                        Span::raw("")
+                    },
+                ]));
+            }
+            crate::forms::FormField::TextArea { value, placeholder, height, .. } => {
+                let display = if value.is_empty() {
+                    placeholder.as_str()
+                } else {
+                    value.as_str()
+                };
+                let value_style = if value.is_empty() {
+                    Style::default().fg(theme::TEXT_SECONDARY)
+                } else {
+                    Style::default().fg(theme::TEXT_PRIMARY)
+                };
+                // Split into lines for multi-line display
+                for line in display.lines().take(*height) {
+                    field_lines.push(Line::from(vec![
+                        Span::raw("     "),
+                        Span::styled(line, value_style),
+                    ]));
+                }
+                if is_current {
+                    field_lines.push(Line::from(vec![
+                        Span::raw("     "),
+                        Span::styled("█", Style::default().fg(theme::ACCENT)),
+                    ]));
+                }
+            }
+            crate::forms::FormField::Number { value, min, max, .. } => {
+                let mut display = format!("{}", value);
+                if let Some(min_val) = min {
+                    display.push_str(&format!(" (min: {})", min_val));
+                }
+                if let Some(max_val) = max {
+                    display.push_str(&format!(" (max: {})", max_val));
+                }
+                field_lines.push(Line::from(vec![
+                    Span::raw("     "),
+                    Span::styled(
+                        display,
+                        if is_current {
+                            Style::default().fg(theme::ACCENT)
+                        } else {
+                            Style::default().fg(theme::TEXT_PRIMARY)
+                        },
+                    ),
+                ]));
+            }
+            crate::forms::FormField::Select { options, selected, .. } => {
+                for (j, option) in options.iter().enumerate() {
+                    let is_selected = j == *selected;
+                    let marker = if is_selected { "●" } else { "○" };
+                    let style = if is_current && is_selected {
+                        Style::default().fg(theme::ACCENT).add_modifier(Modifier::BOLD)
+                    } else if is_selected {
+                        Style::default().fg(theme::SUCCESS)
+                    } else {
+                        Style::default().fg(theme::TEXT_SECONDARY)
+                    };
+                    field_lines.push(Line::from(vec![
+                        Span::raw("       "),
+                        Span::styled(marker, style),
+                        Span::raw(" "),
+                        Span::styled(option, style),
+                    ]));
+                }
+            }
+            crate::forms::FormField::MultiSelect { options, selected, .. } => {
+                for (j, option) in options.iter().enumerate() {
+                    let is_selected = selected.contains(&j);
+                    let marker = if is_selected { "☑" } else { "☐" };
+                    let style = if is_current && is_selected {
+                        Style::default().fg(theme::ACCENT).add_modifier(Modifier::BOLD)
+                    } else if is_selected {
+                        Style::default().fg(theme::SUCCESS)
+                    } else {
+                        Style::default().fg(theme::TEXT_SECONDARY)
+                    };
+                    field_lines.push(Line::from(vec![
+                        Span::raw("       "),
+                        Span::styled(marker, style),
+                        Span::raw(" "),
+                        Span::styled(option, style),
+                    ]));
+                }
+            }
+            crate::forms::FormField::Checkbox { checked, .. } => {
+                let marker = if *checked { "☑" } else { "☐" };
+                let style = if is_current {
+                    Style::default().fg(theme::ACCENT)
+                } else if *checked {
+                    Style::default().fg(theme::SUCCESS)
+                } else {
+                    Style::default().fg(theme::TEXT_SECONDARY)
+                };
+                field_lines.push(Line::from(vec![
+                    Span::raw("     "),
+                    Span::styled(marker, style),
+                ]));
+            }
+            crate::forms::FormField::Path { value, kind, .. } => {
+                let display = if value.is_empty() {
+                    format!("(select {} path)", match kind {
+                        crate::forms::PathKind::File => "file",
+                        crate::forms::PathKind::Directory => "directory",
+                        crate::forms::PathKind::Any => "any",
+                    })
+                } else {
+                    value.clone()
+                };
+                let value_style = if value.is_empty() {
+                    Style::default().fg(theme::TEXT_SECONDARY)
+                } else if is_current {
+                    Style::default().fg(theme::TEXT_PRIMARY).add_modifier(Modifier::UNDERLINED)
+                } else {
+                    Style::default().fg(theme::TEXT_PRIMARY)
+                };
+                field_lines.push(Line::from(vec![
+                    Span::raw("     "),
+                    Span::styled(display, value_style),
+                ]));
+            }
+        }
+    }
+
+    let fields_widget = Paragraph::new(field_lines)
+        .wrap(ratatui::widgets::Wrap { trim: false })
+        .style(Style::default().bg(Color::Black));
+    f.render_widget(fields_widget, fields_area);
+
+    // Render help text
+    chunk_idx += 1;
+    let help_text = vec![
+        Line::from(""),
+        Line::from(vec![
+            Span::raw("  "),
+            Span::styled("Tab/Shift+Tab", Style::default().fg(theme::TEXT_SECONDARY)),
+            Span::raw(" navigate  "),
+            Span::styled("↑↓", Style::default().fg(theme::TEXT_SECONDARY)),
+            Span::raw(" select  "),
+            Span::styled("Space", Style::default().fg(theme::TEXT_SECONDARY)),
+            Span::raw(" toggle  "),
+            Span::styled("Enter", Style::default().fg(theme::TEXT_SECONDARY)),
+            Span::raw(" submit  "),
+            Span::styled("Esc", Style::default().fg(theme::TEXT_SECONDARY)),
+            Span::raw(" cancel"),
+        ]),
+    ];
+    let help = Paragraph::new(help_text)
+        .alignment(Alignment::Left)
+        .style(Style::default().bg(Color::Black));
+    f.render_widget(help, chunks[chunk_idx]);
 }
 
 /// Render horizontal progress bar on the right side

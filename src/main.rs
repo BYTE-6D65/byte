@@ -1,5 +1,6 @@
 mod cli;
 mod config;
+mod forms;
 mod logger;
 mod projects;
 mod state;
