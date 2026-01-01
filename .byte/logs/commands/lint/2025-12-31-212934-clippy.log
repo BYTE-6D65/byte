@@ -1,0 +1,601 @@
+Command: cargo clippy -- -D warnings
+Timestamp: 2025-12-31 21:29:34
+Exit Code: 101
+Working Directory: /Users/liam/Library/Mobile Documents/com~apple~CloudDocs/01_Workspace/03_Projects/01_active_projects/Byte_tooling/byte
+
+--- STDOUT ---
+
+--- STDERR ---
+    Checking byte v0.1.0 (/Users/liam/Library/Mobile Documents/com~apple~CloudDocs/01_Workspace/03_Projects/01_active_projects/Byte_tooling/byte)
+error: unused variable: `stdout`
+   --> src/tui/mod.rs:435:31
+    |
+435 |                 let (success, stdout, stderr) = if is_byte_init {
+    |                               ^^^^^^ help: if this is intentional, prefix it with an underscore: `_stdout`
+    |
+    = note: `-D unused-variables` implied by `-D warnings`
+    = help: to override `-D warnings` add `#[allow(unused_variables)]`
+
+error: unused variable: `stderr`
+   --> src/tui/mod.rs:435:39
+    |
+435 |                 let (success, stdout, stderr) = if is_byte_init {
+    |                                       ^^^^^^ help: if this is intentional, prefix it with an underscore: `_stderr`
+
+error: variable does not need to be mutable
+    --> src/tui/mod.rs:1188:9
+     |
+1188 |     let mut watcher = setup_file_watcher(file_tx, &app)?;
+     |         ----^^^^^^^
+     |         |
+     |         help: remove this `mut`
+     |
+     = note: `-D unused-mut` implied by `-D warnings`
+     = help: to override `-D warnings` add `#[allow(unused_mut)]`
+
+error: unused variable: `right_width`
+    --> src/tui/mod.rs:1965:13
+     |
+1965 |         let right_width = total_width.saturating_sub(left_width);
+     |             ^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_right_width`
+
+error: this `impl` can be derived
+  --> src/config/types.rs:86:1
+   |
+86 | / impl Default for ProjectConfig {
+87 | |     fn default() -> Self {
+88 | |         Self {
+89 | |             project: ProjectMeta::default(),
+...  |
+94 | | }
+   | |_^
+   |
+   = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.92.0/index.html#derivable_impls
+   = note: `-D clippy::derivable-impls` implied by `-D warnings`
+   = help: to override `-D warnings` add `#[allow(clippy::derivable_impls)]`
+help: replace the manual implementation with a derive attribute
+   |
+40 + #[derive(Default)]
+41 | pub struct ProjectConfig {
+   |
+
+error: unnecessary `if let` since only the `Some` variant of the iterator element is used
+  --> src/config/mod.rs:28:9
+   |
+28 | /         for path_opt in config_paths {
+29 | |             if let Some(path) = path_opt {
+30 | |                 if path.exists() {
+31 | |                     let content = fs::read_to_string(&path)?;
+...  |
+38 | |         }
+   | |_________^
+   |
+help: try `.flatten()` and remove the `if let` statement in the for loop
+  --> src/config/mod.rs:29:13
+   |
+29 | /             if let Some(path) = path_opt {
+30 | |                 if path.exists() {
+31 | |                     let content = fs::read_to_string(&path)?;
+32 | |                     let config: GlobalConfig = toml::from_str(&content).map_err(|e| {
+...  |
+37 | |             }
+   | |_____________^
+   = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.92.0/index.html#manual_flatten
+   = note: `-D clippy::manual-flatten` implied by `-D warnings`
+   = help: to override `-D warnings` add `#[allow(clippy::manual_flatten)]`
+help: try
+   |
+28 ~         for path in config_paths.into_iter().flatten() {
+29 +             if path.exists() {
+30 +                 let content = fs::read_to_string(&path)?;
+31 +                 let config: GlobalConfig = toml::from_str(&content).map_err(|e| {
+32 +                     anyhow::anyhow!("Failed to parse global config TOML: {}", e)
+33 +                 })?;
+34 +                 return Ok(config);
+35 +             }
+36 +         }
+   |
+
+error: this `if` statement can be collapsed
+  --> src/config/mod.rs:29:13
+   |
+29 | /             if let Some(path) = path_opt {
+30 | |                 if path.exists() {
+31 | |                     let content = fs::read_to_string(&path)?;
+32 | |                     let config: GlobalConfig = toml::from_str(&content).map_err(|e| {
+...  |
+37 | |             }
+   | |_____________^
+   |
+   = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.92.0/index.html#collapsible_if
+   = note: `-D clippy::collapsible-if` implied by `-D warnings`
+   = help: to override `-D warnings` add `#[allow(clippy::collapsible_if)]`
+help: collapse nested if block
+   |
+29 ~             if let Some(path) = path_opt
+30 ~                 && path.exists() {
+31 |                     let content = fs::read_to_string(&path)?;
+...
+35 |                     return Ok(config);
+36 ~                 }
+   |
+
+error: this `if` statement can be collapsed
+  --> src/config/mod.rs:95:9
+   |
+95 | /         if let Ok(primary_canonical) = primary_path.canonicalize() {
+96 | |             if canonical == primary_canonical {
+97 | |                 anyhow::bail!("Path is already the primary workspace");
+98 | |             }
+99 | |         }
+   | |_________^
+   |
+   = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.92.0/index.html#collapsible_if
+help: collapse nested if block
+   |
+95 ~         if let Ok(primary_canonical) = primary_path.canonicalize()
+96 ~             && canonical == primary_canonical {
+97 |                 anyhow::bail!("Path is already the primary workspace");
+98 ~             }
+   |
+
+error: this `if` statement can be collapsed
+   --> src/config/mod.rs:104:13
+    |
+104 | /             if let Ok(registered_canonical) = registered_path.canonicalize() {
+105 | |                 if canonical == registered_canonical {
+106 | |                     anyhow::bail!("Path is already registered");
+107 | |                 }
+108 | |             }
+    | |_____________^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.92.0/index.html#collapsible_if
+help: collapse nested if block
+    |
+104 ~             if let Ok(registered_canonical) = registered_path.canonicalize()
+105 ~                 && canonical == registered_canonical {
+106 |                     anyhow::bail!("Path is already registered");
+107 ~                 }
+    |
+
+error: this `impl` can be derived
+   --> src/config/mod.rs:145:1
+    |
+145 | / impl Default for Config {
+146 | |     fn default() -> Self {
+147 | |         Self {
+148 | |             global: GlobalConfig::default(),
+...   |
+152 | | }
+    | |_^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.92.0/index.html#derivable_impls
+help: replace the manual implementation with a derive attribute
+    |
+  9 + #[derive(Default)]
+ 10 | pub struct Config {
+    |
+
+error: the borrowed expression implements the required traits
+   --> src/projects.rs:250:15
+    |
+250 |         .args(&["mod", "init", name])
+    |               ^^^^^^^^^^^^^^^^^^^^^^ help: change this to: `["mod", "init", name]`
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.92.0/index.html#needless_borrows_for_generic_args
+    = note: `-D clippy::needless-borrows-for-generic-args` implied by `-D warnings`
+    = help: to override `-D warnings` add `#[allow(clippy::needless_borrows_for_generic_args)]`
+
+error: the borrowed expression implements the required traits
+   --> src/projects.rs:280:15
+    |
+280 |         .args(&["init", "-y"])
+    |               ^^^^^^^^^^^^^^^ help: change this to: `["init", "-y"]`
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.92.0/index.html#needless_borrows_for_generic_args
+
+error: the borrowed expression implements the required traits
+   --> src/projects.rs:301:15
+    |
+301 |         .args(&["init", "--name", name])
+    |               ^^^^^^^^^^^^^^^^^^^^^^^^^ help: change this to: `["init", "--name", name]`
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.92.0/index.html#needless_borrows_for_generic_args
+
+error: the borrowed expression implements the required traits
+   --> src/projects.rs:320:15
+    |
+320 |         .args(&["add", "."])
+    |               ^^^^^^^^^^^^^ help: change this to: `["add", "."]`
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.92.0/index.html#needless_borrows_for_generic_args
+
+error: the borrowed expression implements the required traits
+   --> src/projects.rs:327:15
+    |
+327 |         .args(&["commit", "-m", &commit_message])
+    |               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ help: change this to: `["commit", "-m", &commit_message]`
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.92.0/index.html#needless_borrows_for_generic_args
+
+error: the borrowed expression implements the required traits
+  --> src/state/git.rs:80:15
+   |
+80 |         .args(&["status", "--porcelain=v1", "--branch"])
+   |               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ help: change this to: `["status", "--porcelain=v1", "--branch"]`
+   |
+   = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.92.0/index.html#needless_borrows_for_generic_args
+
+error: this can be `std::io::Error::other(_)`
+  --> src/state/git.rs:87:13
+   |
+87 |           Err(std::io::Error::new(
+   |  _____________^
+88 | |             std::io::ErrorKind::Other,
+89 | |             "git command failed",
+90 | |         ))
+   | |_________^
+   |
+   = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.92.0/index.html#io_other_error
+   = note: `-D clippy::io-other-error` implied by `-D warnings`
+   = help: to override `-D warnings` add `#[allow(clippy::io_other_error)]`
+help: use `std::io::Error::other`
+   |
+87 ~         Err(std::io::Error::other(
+88 ~             "git command failed",
+   |
+
+error: called `.nth(0)` on a `std::iter::Iterator`, when `.next()` is equivalent
+   --> src/state/git.rs:107:30
+    |
+107 |             let first_char = line.chars().nth(0);
+    |                              ^^^^^^^^^^^^^^^^^^^ help: try calling `.next()` instead of `.nth(0)`: `line.chars().next()`
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.92.0/index.html#iter_nth_zero
+    = note: `-D clippy::iter-nth-zero` implied by `-D warnings`
+    = help: to override `-D warnings` add `#[allow(clippy::iter_nth_zero)]`
+
+error: this `if` statement can be collapsed
+   --> src/state/git.rs:155:9
+    |
+155 | /         if let Some(bracket_start) = rest.find('[') {
+156 | |             if let Some(bracket_end) = rest.find(']') {
+157 | |                 let tracking_info = &rest[bracket_start + 1..bracket_end];
+...   |
+183 | |         }
+    | |_________^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.92.0/index.html#collapsible_if
+help: collapse nested if block
+    |
+155 ~         if let Some(bracket_start) = rest.find('[')
+156 ~             && let Some(bracket_end) = rest.find(']') {
+157 |                 let tracking_info = &rest[bracket_start + 1..bracket_end];
+...
+181 |                 }
+182 ~             }
+    |
+
+error: this `if` statement can be collapsed
+   --> src/state/git.rs:162:21
+    |
+162 | /                     if let Some(comma_or_end) =
+163 | |                         ahead_str.find(',').or_else(|| Some(ahead_str.len()))
+164 | |                     {
+165 | |                         if let Ok(ahead) = ahead_str[..comma_or_end].trim().parse::<usize>() {
+...   |
+168 | |                     }
+    | |_____________________^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.92.0/index.html#collapsible_if
+help: collapse nested if block
+    |
+163 ~                         ahead_str.find(',').or_else(|| Some(ahead_str.len()))
+164 ~                         && let Ok(ahead) = ahead_str[..comma_or_end].trim().parse::<usize>() {
+165 |                             status.ahead = ahead;
+166 ~                         }
+    |
+
+error: unnecessary closure used to substitute value for `Option::None`
+   --> src/state/git.rs:163:25
+    |
+163 |                         ahead_str.find(',').or_else(|| Some(ahead_str.len()))
+    |                         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.92.0/index.html#unnecessary_lazy_evaluations
+    = note: `-D clippy::unnecessary-lazy-evaluations` implied by `-D warnings`
+    = help: to override `-D warnings` add `#[allow(clippy::unnecessary_lazy_evaluations)]`
+help: use `or` instead
+    |
+163 -                         ahead_str.find(',').or_else(|| Some(ahead_str.len()))
+163 +                         ahead_str.find(',').or(Some(ahead_str.len()))
+    |
+
+error: this `if` statement can be collapsed
+   --> src/state/git.rs:174:21
+    |
+174 | /                     if let Some(comma_or_end) =
+175 | |                         behind_str.find(',').or_else(|| Some(behind_str.len()))
+176 | |                     {
+177 | |                         if let Ok(behind) = behind_str[..comma_or_end].trim().parse::<usize>() {
+...   |
+180 | |                     }
+    | |_____________________^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.92.0/index.html#collapsible_if
+help: collapse nested if block
+    |
+175 ~                         behind_str.find(',').or_else(|| Some(behind_str.len()))
+176 ~                         && let Ok(behind) = behind_str[..comma_or_end].trim().parse::<usize>() {
+177 |                             status.behind = behind;
+178 ~                         }
+    |
+
+error: unnecessary closure used to substitute value for `Option::None`
+   --> src/state/git.rs:175:25
+    |
+175 |                         behind_str.find(',').or_else(|| Some(behind_str.len()))
+    |                         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.92.0/index.html#unnecessary_lazy_evaluations
+help: use `or` instead
+    |
+175 -                         behind_str.find(',').or_else(|| Some(behind_str.len()))
+175 +                         behind_str.find(',').or(Some(behind_str.len()))
+    |
+
+error: this `if` statement can be collapsed
+   --> src/tui/mod.rs:355:9
+    |
+355 | /         if result.is_build_cmd {
+356 | |             if let Some(task) = result.task_name {
+357 | |                 let build_status = if result.success {
+358 | |                     BuildStatus::Success
+...   |
+370 | |         }
+    | |_________^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.92.0/index.html#collapsible_if
+help: collapse nested if block
+    |
+355 ~         if result.is_build_cmd
+356 ~             && let Some(task) = result.task_name {
+357 |                 let build_status = if result.success {
+...
+368 |                 let _ = state::build::save_build_state(&result.working_dir, state);
+369 ~             }
+    |
+
+error: useless use of `format!`
+   --> src/tui/mod.rs:380:35
+    |
+380 |             self.status_message = format!("✗ Command failed");
+    |                                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^ help: consider using `.to_string()`: `"✗ Command failed".to_string()`
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.92.0/index.html#useless_format
+    = note: `-D clippy::useless-format` implied by `-D warnings`
+    = help: to override `-D warnings` add `#[allow(clippy::useless_format)]`
+
+error: this `if` statement can be collapsed
+   --> src/tui/mod.rs:550:21
+    |
+550 | /                     if entry
+551 | |                         .file_type()
+552 | |                         .ok()
+553 | |                         .map(|ft| ft.is_dir())
+...   |
+583 | |                     }
+    | |_____________________^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.92.0/index.html#collapsible_if
+help: collapse nested if block
+    |
+554 ~                         .unwrap_or(false)
+555 ~                         && let Ok(name) = entry.file_name().into_string() {
+556 |                             // Fuzzy match: check if all chars of prefix appear in order
+...
+580 |                             }
+581 ~                         }
+    |
+
+error: this `if` statement can be collapsed
+   --> src/tui/mod.rs:722:17
+    |
+722 | /                 if matches!(self.input_mode, InputMode::Normal) {
+723 | |                     if let Some(workspace) = self.workspace_directories.get(self.selected_workspace)
+724 | |                     {
+725 | |                         if workspace.is_primary {
+...   |
+740 | |                 }
+    | |_________________^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.92.0/index.html#collapsible_if
+help: collapse nested if block
+    |
+722 ~                 if matches!(self.input_mode, InputMode::Normal)
+723 ~                     && let Some(workspace) = self.workspace_directories.get(self.selected_workspace)
+724 |                     {
+...
+738 |                         }
+739 ~                     }
+    |
+
+error: this `if` statement can be collapsed
+   --> src/tui/mod.rs:743:17
+    |
+743 | /                 if matches!(self.input_mode, InputMode::Normal) {
+744 | |                     if let Some(workspace) = self.workspace_directories.get(self.selected_workspace)
+745 | |                     {
+746 | |                         if workspace.is_primary {
+...   |
+760 | |                 }
+    | |_________________^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.92.0/index.html#collapsible_if
+help: collapse nested if block
+    |
+743 ~                 if matches!(self.input_mode, InputMode::Normal)
+744 ~                     && let Some(workspace) = self.workspace_directories.get(self.selected_workspace)
+745 |                     {
+...
+758 |                         }
+759 ~                     }
+    |
+
+error: this `if` statement can be collapsed
+    --> src/tui/mod.rs:1138:9
+     |
+1138 | /         if let Ok(content) = std::fs::read_to_string(&config_path) {
+1139 | |             if let Ok(config) = toml::from_str::<crate::config::ProjectConfig>(&content) {
+1140 | |                 // Add build commands
+1141 | |                 if let Some(build_cmds) = config.build {
+...    |
+1162 | |         }
+     | |_________^
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.92.0/index.html#collapsible_if
+help: collapse nested if block
+     |
+1138 ~         if let Ok(content) = std::fs::read_to_string(&config_path)
+1139 ~             && let Ok(config) = toml::from_str::<crate::config::ProjectConfig>(&content) {
+1140 |                 // Add build commands
+ ...
+1160 |                 }
+1161 ~             }
+     |
+
+error: this `if` statement can be collapsed
+    --> src/tui/mod.rs:1228:25
+     |
+1228 | /                         if let Some(path) = path {
+1229 | |                             if path.file_name().and_then(|n| n.to_str()) == Some("byte.toml")
+1230 | |                                 || path.file_name().and_then(|n| n.to_str()) == Some("config.toml")
+...    |
+1240 | |                         }
+     | |_________________________^
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.92.0/index.html#collapsible_if
+help: collapse nested if block
+     |
+1228 ~                         if let Some(path) = path
+1229 ~                             && (path.file_name().and_then(|n| n.to_str()) == Some("byte.toml")
+1230 ~                                 || path.file_name().and_then(|n| n.to_str()) == Some("config.toml"))
+1231 |                             {
+ ...
+1238 |                                 break;
+1239 ~                             }
+     |
+
+error: this `if` statement can be collapsed
+    --> src/tui/mod.rs:1350:21
+     |
+1350 | /                     if entry
+1351 | |                         .file_type()
+1352 | |                         .ok()
+1353 | |                         .map(|ft| ft.is_dir())
+...    |
+1361 | |                     }
+     | |_____________________^
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.92.0/index.html#collapsible_if
+help: collapse nested if block
+     |
+1354 ~                         .unwrap_or(false)
+1355 ~                         && let Ok(name) = entry.file_name().into_string() {
+1356 |                             let full_path =
+1357 |                                 format!("{}/{}", current_input.trim_end_matches('/'), name);
+1358 |                             candidates.push(full_path);
+1359 ~                         }
+     |
+
+error: this `if` statement can be collapsed
+    --> src/tui/mod.rs:1418:9
+     |
+1418 | /         if let Some((_, timestamp)) = app.command_result_display {
+1419 | |             if timestamp.elapsed() >= Duration::from_secs(3) {
+1420 | |                 app.command_result_display = None;
+1421 | |             }
+1422 | |         }
+     | |_________^
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.92.0/index.html#collapsible_if
+help: collapse nested if block
+     |
+1418 ~         if let Some((_, timestamp)) = app.command_result_display
+1419 ~             && timestamp.elapsed() >= Duration::from_secs(3) {
+1420 |                 app.command_result_display = None;
+1421 ~             }
+     |
+
+error: redundant pattern matching, consider using `is_some()`
+    --> src/tui/mod.rs:1431:16
+     |
+1431 |         if let Some(_) = &app.pending_result {
+     |         -------^^^^^^^---------------------- help: try: `if app.pending_result.is_some()`
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.92.0/index.html#redundant_pattern_matching
+     = note: `-D clippy::redundant-pattern-matching` implied by `-D warnings`
+     = help: to override `-D warnings` add `#[allow(clippy::redundant_pattern_matching)]`
+
+error: redundant pattern matching, consider using `is_ok()`
+    --> src/tui/mod.rs:1449:16
+     |
+1449 |         if let Ok(_) = file_rx.try_recv() {
+     |         -------^^^^^--------------------- help: try: `if file_rx.try_recv().is_ok()`
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.92.0/index.html#redundant_pattern_matching
+
+error: useless use of `vec!`
+    --> src/tui/mod.rs:1563:16
+     |
+1563 |       let tabs = vec![
+     |  ________________^
+1564 | |         ("1", "Projects", 0),
+1565 | |         ("2", "Commands", 1),
+1566 | |         ("3", "Details", 2),
+1567 | |         ("4", "Workspace", 3),
+1568 | |     ];
+     | |_____^
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.92.0/index.html#useless_vec
+     = note: `-D clippy::useless-vec` implied by `-D warnings`
+     = help: to override `-D warnings` add `#[allow(clippy::useless_vec)]`
+help: you can use an array directly
+     |
+1563 ~     let tabs = [("1", "Projects", 0),
+1564 +         ("2", "Commands", 1),
+1565 +         ("3", "Details", 2),
+1566 ~         ("4", "Workspace", 3)];
+     |
+
+error: hiding a lifetime that's elided elsewhere is confusing
+    --> src/tui/mod.rs:2032:27
+     |
+2032 | fn render_git_status(git: &GitStatus) -> Vec<Line> {
+     |                           ^^^^^^^^^^         ^^^^ the same lifetime is hidden here
+     |                           |
+     |                           the lifetime is elided here
+     |
+     = help: the same lifetime is referred to in inconsistent ways, making the signature confusing
+     = note: `-D mismatched-lifetime-syntaxes` implied by `-D warnings`
+     = help: to override `-D warnings` add `#[allow(mismatched_lifetime_syntaxes)]`
+help: use `'_` for type paths
+     |
+2032 | fn render_git_status(git: &GitStatus) -> Vec<Line<'_>> {
+     |                                                  ++++
+
+error: hiding a lifetime that's elided elsewhere is confusing
+    --> src/tui/mod.rs:2114:30
+     |
+2114 | fn render_build_state(build: &BuildState) -> Vec<Line> {
+     |                              ^^^^^^^^^^^         ^^^^ the same lifetime is hidden here
+     |                              |
+     |                              the lifetime is elided here
+     |
+     = help: the same lifetime is referred to in inconsistent ways, making the signature confusing
+help: use `'_` for type paths
+     |
+2114 | fn render_build_state(build: &BuildState) -> Vec<Line<'_>> {
+     |                                                      ++++
+
+error: could not compile `byte` (lib) due to 37 previous errors

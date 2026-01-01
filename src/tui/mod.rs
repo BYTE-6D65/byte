@@ -13,6 +13,7 @@ use ratatui::{
 };
 use std::collections::HashMap;
 use std::io;
+use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use crate::state::{self, BuildState, BuildStatus, GitStatus, ProjectState, get_project_state};
@@ -91,6 +92,7 @@ pub struct App {
     // Project state caching
     pub project_states: HashMap<String, ProjectState>,
     pub last_state_refresh: Instant,
+    pub last_hotload: Instant,
     // Command execution animation
     pub executing_command: Option<String>,
     pub build_animation_frame: usize,
@@ -102,6 +104,10 @@ pub struct App {
     pub pending_editor: Option<(String, String)>, // (editor, file_path)
     // Log navigation in Details view
     pub selected_log: usize,
+    // Log preview in Details view
+    pub viewing_log: Option<(PathBuf, usize)>, // (path, scroll_offset)
+    // Flag to trigger terminal clear on next draw
+    pub needs_clear: bool,
 }
 
 pub enum View {
@@ -162,6 +168,7 @@ impl Default for App {
             fuzzy_browsing: false,
             project_states: HashMap::new(),
             last_state_refresh: Instant::now(),
+            last_hotload: Instant::now(),
             executing_command: None,
             build_animation_frame: 0,
             build_animation_start: None,
@@ -170,6 +177,8 @@ impl Default for App {
             command_result_display: None,
             pending_editor: None,
             selected_log: 0,
+            viewing_log: None,
+            needs_clear: false,
         };
 
         if !app.projects.is_empty() {
@@ -776,6 +785,23 @@ impl App {
                 if matches!(self.current_view, View::Detail)
                     && matches!(self.input_mode, InputMode::Normal) =>
             {
+                // Preview selected log in right panel
+                if let Some(project) = self.get_selected_project() {
+                    let logs = crate::logger::get_recent_logs(&project.path, 5);
+                    if let Some(log) = logs.get(self.selected_log) {
+                        self.viewing_log = Some((log.path.clone(), 0)); // path, scroll_offset=0
+                        self.status_message = format!("Viewing: {}", log.filename);
+                    } else {
+                        self.status_message = "✗ No logs available".to_string();
+                    }
+                } else {
+                    self.status_message = "✗ No project selected".to_string();
+                }
+            }
+            KeyCode::Char('o')
+                if matches!(self.current_view, View::Detail)
+                    && matches!(self.input_mode, InputMode::Normal) =>
+            {
                 // Open selected log file in external editor
                 if let Some(project) = self.get_selected_project() {
                     let logs = crate::logger::get_recent_logs(&project.path, 5);
@@ -791,6 +817,14 @@ impl App {
                 } else {
                     self.status_message = "✗ No project selected".to_string();
                 }
+            }
+            KeyCode::Esc
+                if matches!(self.current_view, View::Detail) && self.viewing_log.is_some() =>
+            {
+                // Close log preview
+                self.viewing_log = None;
+                self.needs_clear = true; // Trigger terminal clear to remove lingering text
+                self.status_message = "Closed log preview".to_string();
             }
             KeyCode::Esc
                 if matches!(
@@ -878,8 +912,10 @@ impl App {
                             }
                         }
                         View::Detail => {
-                            // Navigate through logs
-                            if self.selected_log > 0 {
+                            // If viewing a log, scroll within it. Otherwise navigate log list.
+                            if let Some((_path, scroll_offset)) = &mut self.viewing_log {
+                                *scroll_offset = scroll_offset.saturating_sub(1);
+                            } else if self.selected_log > 0 {
                                 self.selected_log -= 1;
                             }
                         }
@@ -927,14 +963,32 @@ impl App {
                             }
                         }
                         View::Detail => {
-                            // Navigate through logs
-                            if let Some(project) = self.get_selected_project() {
+                            // If viewing a log, scroll within it. Otherwise navigate log list.
+                            if let Some((_path, scroll_offset)) = &mut self.viewing_log {
+                                *scroll_offset = scroll_offset.saturating_add(1);
+                            } else if let Some(project) = self.get_selected_project() {
                                 let log_count = crate::logger::get_recent_logs(&project.path, 5).len();
                                 if self.selected_log < log_count.saturating_sub(1) {
                                     self.selected_log += 1;
                                 }
                             }
                         }
+                    }
+                }
+            }
+            KeyCode::PageUp => {
+                // Scroll log preview up
+                if matches!(self.current_view, View::Detail) {
+                    if let Some((path, scroll_offset)) = &mut self.viewing_log {
+                        *scroll_offset = scroll_offset.saturating_sub(10);
+                    }
+                }
+            }
+            KeyCode::PageDown => {
+                // Scroll log preview down
+                if matches!(self.current_view, View::Detail) {
+                    if let Some((path, scroll_offset)) = &mut self.viewing_log {
+                        *scroll_offset = scroll_offset.saturating_add(10);
                     }
                 }
             }
@@ -1130,6 +1184,9 @@ impl App {
     }
 
     pub fn update_commands(&mut self) {
+        // Save current selection
+        let previous_selection = self.selected_command;
+
         self.commands.clear();
 
         // Get project path if a project is selected (clone to avoid borrow issues)
@@ -1143,10 +1200,15 @@ impl App {
             self.load_init_commands();
         }
 
-        // Reset selection
+        // Preserve selection if still valid, otherwise reset to 0
         if !self.commands.is_empty() {
-            self.command_list_state.select(Some(0));
-            self.selected_command = 0;
+            let new_selection = if previous_selection < self.commands.len() {
+                previous_selection
+            } else {
+                0
+            };
+            self.command_list_state.select(Some(new_selection));
+            self.selected_command = new_selection;
         }
     }
 
@@ -1262,13 +1324,20 @@ fn setup_file_watcher(
         move |result: Result<Vec<notify_debouncer_full::DebouncedEvent>, Vec<notify::Error>>| {
             match result {
                 Ok(events) => {
-                    // Check if any event is for a byte.toml file
+                    // Check if any event is for a byte.toml, config.toml, or git file
                     for event in events {
                         let path = event.paths.first();
                         if let Some(path) = path {
-                            if path.file_name().and_then(|n| n.to_str()) == Some("byte.toml")
+                            let should_reload =
+                                // byte.toml or config.toml changes
+                                path.file_name().and_then(|n| n.to_str()) == Some("byte.toml")
                                 || path.file_name().and_then(|n| n.to_str()) == Some("config.toml")
-                            {
+                                // Git changes: HEAD (branch switch), refs (commits), index (staging)
+                                || path.to_string_lossy().contains(".git/HEAD")
+                                || path.to_string_lossy().contains(".git/refs/heads/")
+                                || path.to_string_lossy().contains(".git/index");
+
+                            if should_reload {
                                 crate::logger::info(&format!(
                                     "[WATCHER] Detected change: {:?}",
                                     path
@@ -1473,6 +1542,12 @@ fn run_app(
     cmd_rx: std::sync::mpsc::Receiver<CommandResult>,
 ) -> anyhow::Result<()> {
     while !app.should_quit {
+        // Clear terminal if needed (e.g., after closing log preview)
+        if app.needs_clear {
+            terminal.clear()?;
+            app.needs_clear = false;
+        }
+
         terminal.draw(|f| ui(f, app))?;
 
         // Update animation frame if command is executing
@@ -1513,8 +1588,12 @@ fn run_app(
 
         // Check for file system events (non-blocking)
         if let Ok(_) = file_rx.try_recv() {
-            app.hotload();
-            app.status_message = "✓ Auto-reloaded (file changed)".to_string();
+            // Throttle: only hotload if it's been at least 1 second since last hotload
+            if app.last_hotload.elapsed() >= Duration::from_secs(1) {
+                app.hotload();
+                app.last_hotload = Instant::now();
+                // Don't override status message - visual updates are enough feedback
+            }
         }
 
         if event::poll(Duration::from_millis(50))? {
@@ -2031,20 +2110,47 @@ fn render_command_palette(f: &mut Frame, area: ratatui::layout::Rect, app: &App)
 }
 
 fn render_detail(f: &mut Frame, area: ratatui::layout::Rect, app: &App) {
+    // Maximize vertical space when viewing log
+    let vertical_margin = if app.viewing_log.is_some() { 0 } else { 1 };
     let inner_area = area.inner(Margin {
         horizontal: 2,
-        vertical: 1,
+        vertical: vertical_margin,
     });
 
-    if let Some(project) = app.get_selected_project() {
-        // Use 2-column layout: info (left) | metadata (right)
-        let total_width = inner_area.width.saturating_sub(4) as usize;
-        let left_width = (total_width * 70) / 100;
-        let right_width = total_width.saturating_sub(left_width);
+    // When viewing log, use full width for preview. Otherwise show details normally.
+    let (details_area, log_area) = if app.viewing_log.is_some() {
+        // Full screen log preview - hide details panel
+        (inner_area, Some(inner_area))
+    } else {
+        (inner_area, None)
+    };
 
-        let mut lines = vec![
-            // Line 1: Name (left) | PATH label + value (right)
-            Line::from(vec![
+    if let Some(project) = app.get_selected_project() {
+        let mut lines = vec![];
+
+        // Simple single-column layout when viewing log, 2-column when not
+        if app.viewing_log.is_some() {
+            // Compact vertical layout - just project name and description
+            lines.push(Line::from(vec![
+                Span::styled(
+                    &project.name,
+                    Style::default()
+                        .fg(theme::ACCENT)
+                        .add_modifier(Modifier::BOLD),
+                ),
+            ]));
+            lines.push(Line::from(""));
+            lines.push(Line::from(vec![Span::styled(
+                &project.description,
+                Style::default().fg(theme::TEXT_SECONDARY),
+            )]));
+            lines.push(Line::from(""));
+        } else {
+            // Full 2-column layout when not viewing log
+            let total_width = details_area.width.saturating_sub(4) as usize;
+            let left_width = (total_width * 70) / 100;
+
+            lines.push(Line::from(vec![
                 Span::styled(
                     format!("{:width$}", project.name, width = left_width),
                     Style::default()
@@ -2055,15 +2161,14 @@ fn render_detail(f: &mut Frame, area: ratatui::layout::Rect, app: &App) {
                     format!("PATH: {}", project.path),
                     Style::default().fg(theme::TEXT_SECONDARY),
                 ),
-            ]),
-            Line::from(""),
-            // Line 3: Description (left) | empty (right)
-            Line::from(vec![Span::styled(
+            ]));
+            lines.push(Line::from(""));
+            lines.push(Line::from(vec![Span::styled(
                 project.description.clone(),
                 Style::default().fg(theme::TEXT_SECONDARY),
-            )]),
-            Line::from(""),
-        ];
+            )]));
+            lines.push(Line::from(""));
+        }
 
         // Git Status and Build State
         if let Some(state) = app.get_current_project_state() {
@@ -2094,8 +2199,18 @@ fn render_detail(f: &mut Frame, area: ratatui::layout::Rect, app: &App) {
             ),
         ]));
 
-        let paragraph = Paragraph::new(lines).block(Block::default().borders(Borders::NONE));
-        f.render_widget(paragraph, inner_area);
+        // Only render details panel if NOT viewing log
+        if app.viewing_log.is_none() {
+            let paragraph = Paragraph::new(lines).block(Block::default().borders(Borders::NONE));
+            f.render_widget(paragraph, details_area);
+        }
+
+        // Render log preview if viewing (full screen)
+        if let Some((log_path, scroll_offset)) = &app.viewing_log {
+            if let Some(area) = log_area {
+                render_log_preview(f, area, log_path, *scroll_offset, &project.path);
+            }
+        }
     } else {
         let paragraph = Paragraph::new(vec![
             Line::from(""),
@@ -2106,7 +2221,7 @@ fn render_detail(f: &mut Frame, area: ratatui::layout::Rect, app: &App) {
         ])
         .block(Block::default().borders(Borders::NONE))
         .alignment(Alignment::Center);
-        f.render_widget(paragraph, inner_area);
+        f.render_widget(paragraph, details_area);
     }
 }
 
@@ -2325,13 +2440,79 @@ fn render_recent_logs(project_path: &str, selected_log: usize) -> Vec<Line> {
         lines.push(Line::from(vec![
             Span::styled("  Use ", Style::default().fg(theme::TEXT_SECONDARY)),
             Span::styled("↑↓", Style::default().fg(theme::ACCENT)),
-            Span::styled(" to navigate, press ", Style::default().fg(theme::TEXT_SECONDARY)),
+            Span::styled(" to navigate, ", Style::default().fg(theme::TEXT_SECONDARY)),
             Span::styled("l", Style::default().fg(theme::ACCENT)),
-            Span::styled(" to open selected log", Style::default().fg(theme::TEXT_SECONDARY)),
+            Span::styled(" to preview, ", Style::default().fg(theme::TEXT_SECONDARY)),
+            Span::styled("o", Style::default().fg(theme::ACCENT)),
+            Span::styled(" to open in editor", Style::default().fg(theme::TEXT_SECONDARY)),
         ]));
     }
 
     lines
+}
+
+/// Render log file preview
+fn render_log_preview(f: &mut Frame, area: ratatui::layout::Rect, log_path: &PathBuf, scroll_offset: usize, project_path: &str) {
+    use std::fs;
+    use std::io::{BufRead, BufReader};
+
+    // Get filename for display
+    let filename = log_path.file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("unknown");
+
+    // Read log file
+    let content = match fs::File::open(log_path) {
+        Ok(file) => {
+            let reader = BufReader::new(file);
+            let lines: Vec<String> = reader.lines()
+                .filter_map(|line| line.ok())
+                .collect();
+            lines
+        }
+        Err(e) => {
+            vec![format!("Error reading log file: {}", e)]
+        }
+    };
+
+    // Calculate visible range - maximize visible content
+    let total_lines = content.len();
+    let visible_height = area.height.saturating_sub(4) as usize; // Only borders + 2-line header
+    let start_line = scroll_offset.min(total_lines.saturating_sub(1));
+    let end_line = (start_line + visible_height).min(total_lines);
+
+    // Create lines to display
+    let mut display_lines = vec![];
+
+    // Ultra-compact 2-line header
+    display_lines.push(Line::from(vec![
+        Span::styled(filename, Style::default().fg(theme::ACCENT).add_modifier(Modifier::BOLD)),
+        Span::raw("  "),
+        Span::styled(
+            format!("({}/{})", start_line + 1, total_lines),
+            Style::default().fg(theme::TEXT_SECONDARY),
+        ),
+    ]));
+    display_lines.push(Line::from(vec![
+        Span::styled(
+            format!("PATH: {}", project_path),
+            Style::default().fg(theme::TEXT_SECONDARY),
+        ),
+    ]));
+
+    // Add visible lines with word wrapping (no truncation)
+    for line in content.iter().skip(start_line).take(end_line - start_line) {
+        display_lines.push(Line::from(line.clone()));
+    }
+
+    let paragraph = Paragraph::new(display_lines)
+        .block(Block::default()
+            .borders(Borders::ALL)
+            .border_type(ratatui::widgets::BorderType::Rounded)
+            .border_style(Style::default().fg(theme::ACCENT)))
+        .wrap(ratatui::widgets::Wrap { trim: false }); // Enable word wrapping
+
+    f.render_widget(paragraph, area);
 }
 
 fn render_workspace_manager(f: &mut Frame, area: ratatui::layout::Rect, app: &App) {

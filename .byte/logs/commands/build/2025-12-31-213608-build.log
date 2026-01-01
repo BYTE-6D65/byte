@@ -1,0 +1,81 @@
+Command: cargo build --release
+Timestamp: 2025-12-31 21:36:08
+Exit Code: 0
+Working Directory: /Users/liam/Library/Mobile Documents/com~apple~CloudDocs/01_Workspace/03_Projects/01_active_projects/Byte_tooling/byte
+
+--- STDOUT ---
+
+--- STDERR ---
+warning: unused variable: `stdout`
+   --> src/tui/mod.rs:435:31
+    |
+435 |                 let (success, stdout, stderr) = if is_byte_init {
+    |                               ^^^^^^ help: if this is intentional, prefix it with an underscore: `_stdout`
+    |
+    = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused variable: `stderr`
+   --> src/tui/mod.rs:435:39
+    |
+435 |                 let (success, stdout, stderr) = if is_byte_init {
+    |                                       ^^^^^^ help: if this is intentional, prefix it with an underscore: `_stderr`
+
+warning: variable does not need to be mutable
+    --> src/tui/mod.rs:1188:9
+     |
+1188 |     let mut watcher = setup_file_watcher(file_tx, &app)?;
+     |         ----^^^^^^^
+     |         |
+     |         help: remove this `mut`
+     |
+     = note: `#[warn(unused_mut)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused variable: `right_width`
+    --> src/tui/mod.rs:1965:13
+     |
+1965 |         let right_width = total_width.saturating_sub(left_width);
+     |             ^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_right_width`
+
+warning: hiding a lifetime that's elided elsewhere is confusing
+    --> src/tui/mod.rs:2032:27
+     |
+2032 | fn render_git_status(git: &GitStatus) -> Vec<Line> {
+     |                           ^^^^^^^^^^         ^^^^ the same lifetime is hidden here
+     |                           |
+     |                           the lifetime is elided here
+     |
+     = help: the same lifetime is referred to in inconsistent ways, making the signature confusing
+     = note: `#[warn(mismatched_lifetime_syntaxes)]` on by default
+help: use `'_` for type paths
+     |
+2032 | fn render_git_status(git: &GitStatus) -> Vec<Line<'_>> {
+     |                                                  ++++
+
+warning: hiding a lifetime that's elided elsewhere is confusing
+    --> src/tui/mod.rs:2114:30
+     |
+2114 | fn render_build_state(build: &BuildState) -> Vec<Line> {
+     |                              ^^^^^^^^^^^         ^^^^ the same lifetime is hidden here
+     |                              |
+     |                              the lifetime is elided here
+     |
+     = help: the same lifetime is referred to in inconsistent ways, making the signature confusing
+help: use `'_` for type paths
+     |
+2114 | fn render_build_state(build: &BuildState) -> Vec<Line<'_>> {
+     |                                                      ++++
+
+warning: `byte` (lib) generated 6 warnings (run `cargo fix --lib -p byte` to apply 6 suggestions)
+warning: field `project` is never read
+  --> src/config/mod.rs:11:9
+   |
+ 9 | pub struct Config {
+   |            ------ field in this struct
+10 |     pub global: GlobalConfig,
+11 |     pub project: Option<ProjectConfig>,
+   |         ^^^^^^^
+   |
+   = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: `byte` (bin "byte") generated 7 warnings (6 duplicates)
+    Finished `release` profile [optimized] target(s) in 0.10s
