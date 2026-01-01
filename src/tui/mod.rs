@@ -11,8 +11,11 @@ use ratatui::{
     text::{Line, Span},
     widgets::{Block, Borders, List, ListItem, ListState, Paragraph},
 };
+use std::collections::HashMap;
 use std::io;
-use std::time::Duration;
+use std::time::{Duration, Instant};
+
+use crate::state::{self, BuildState, BuildStatus, GitStatus, ProjectState, get_project_state};
 
 // Theme colors optimized for OLED black backgrounds
 mod theme {
@@ -23,11 +26,9 @@ mod theme {
     pub const SUCCESS: Color = Color::Green; // Success states, active items
     pub const ERROR: Color = Color::Red; // Error states, warnings
 
-    // Text hierarchy (optimized for OLED black)
-    pub const TEXT_PRIMARY: Color = Color::White; // Primary content
-    pub const TEXT_SECONDARY: Color = Color::Rgb(160, 160, 160); // Secondary content (descriptions)
-    pub const TEXT_TERTIARY: Color = Color::Rgb(140, 140, 140); // Tertiary content (labels, hashtags)
-    pub const TEXT_DIM: Color = Color::Rgb(120, 120, 120); // Subtle text (footer hints)
+    // Text hierarchy (simplified for OLED black - high contrast)
+    pub const TEXT_PRIMARY: Color = Color::White; // Primary content, main text
+    pub const TEXT_SECONDARY: Color = Color::Rgb(180, 180, 180); // Secondary content, metadata, paths
 
     // UI elements
     pub const SEPARATOR: Color = Color::Rgb(60, 60, 60); // Lines, dividers
@@ -82,11 +83,25 @@ pub struct App {
     pub input_buffer: String,
     pub launch_fuzzy_picker: bool,
     pub editing_workspace_index: Option<usize>, // Track which workspace is being edited
-    pub command_working_dir: String, // Working directory for command execution
+    pub selected_target_workspace: usize,       // Which workspace to use as command target
     // Inline fuzzy matching
     pub fuzzy_matches: Vec<String>,
     pub fuzzy_selected: usize,
     pub fuzzy_browsing: bool, // true when navigating matches, false when typing
+    // Project state caching
+    pub project_states: HashMap<String, ProjectState>,
+    pub last_state_refresh: Instant,
+    // Command execution animation
+    pub executing_command: Option<String>,
+    pub build_animation_frame: usize,
+    pub build_animation_start: Option<Instant>,
+    pub command_tx: Option<std::sync::mpsc::Sender<CommandResult>>,
+    pub pending_result: Option<CommandResult>,
+    pub command_result_display: Option<(bool, Instant)>, // (success, timestamp) for showing result
+    // Interactive editor request
+    pub pending_editor: Option<(String, String)>, // (editor, file_path)
+    // Log navigation in Details view
+    pub selected_log: usize,
 }
 
 pub enum View {
@@ -94,6 +109,15 @@ pub enum View {
     CommandPalette,
     Detail,
     WorkspaceManager,
+}
+
+#[derive(Clone)]
+pub struct CommandResult {
+    pub success: bool,
+    pub command: String,
+    pub working_dir: String,
+    pub is_build_cmd: bool,
+    pub task_name: Option<String>,
 }
 
 impl Default for App {
@@ -132,10 +156,20 @@ impl Default for App {
             input_buffer: String::new(),
             launch_fuzzy_picker: false,
             editing_workspace_index: None,
-            command_working_dir: "~/projects".to_string(), // Default, will be set from config
+            selected_target_workspace: 0, // Default to primary workspace
             fuzzy_matches: vec![],
             fuzzy_selected: 0,
             fuzzy_browsing: false,
+            project_states: HashMap::new(),
+            last_state_refresh: Instant::now(),
+            executing_command: None,
+            build_animation_frame: 0,
+            build_animation_start: None,
+            command_tx: None,
+            pending_result: None,
+            command_result_display: None,
+            pending_editor: None,
+            selected_log: 0,
         };
 
         if !app.projects.is_empty() {
@@ -154,9 +188,6 @@ impl App {
         if let Ok(config) = crate::config::Config::load() {
             // Load workspace directories
             let workspace_path = &config.global.workspace.path;
-
-            // Set working directory for commands to primary workspace
-            app.command_working_dir = workspace_path.clone();
 
             app.workspace_directories.push(WorkspaceDir {
                 path: workspace_path.clone(),
@@ -193,26 +224,44 @@ impl App {
                 // Update project counts for workspaces
                 for workspace in &mut app.workspace_directories {
                     let expanded_path = shellexpand::tilde(&workspace.path).to_string();
-                    crate::logger::info(&format!("[COUNT] Counting projects for workspace: {}", expanded_path));
+                    let normalized_workspace = expanded_path.trim_end_matches('/').to_lowercase();
+                    crate::logger::info(&format!(
+                        "[COUNT] Counting projects for workspace: {}",
+                        expanded_path
+                    ));
                     for proj in &app.projects {
-                        crate::logger::info(&format!("[COUNT]   Checking project: {} (starts_with? {})",
-                            proj.path, proj.path.starts_with(&expanded_path)));
+                        let normalized_proj = proj.path.trim_end_matches('/').to_lowercase();
+                        let matches = normalized_proj.starts_with(&normalized_workspace);
+                        crate::logger::info(&format!(
+                            "[COUNT]   Checking project: {} (starts_with? {})",
+                            proj.path, matches
+                        ));
                     }
                     workspace.project_count = app
                         .projects
                         .iter()
-                        .filter(|p| p.path.starts_with(&expanded_path))
+                        .filter(|p| {
+                            let normalized_proj = p.path.trim_end_matches('/').to_lowercase();
+                            normalized_proj.starts_with(&normalized_workspace)
+                        })
                         .count();
-                    crate::logger::info(&format!("[COUNT] Final count for {}: {}", expanded_path, workspace.project_count));
+                    crate::logger::info(&format!(
+                        "[COUNT] Final count for {}: {}",
+                        expanded_path, workspace.project_count
+                    ));
                 }
 
                 if !app.projects.is_empty() {
                     app.project_list_state.select(Some(0));
                     app.status_message = format!("Discovered {} projects", app.projects.len());
                 } else {
-                    app.status_message = "No projects found. Use 'byte init' to create one.".to_string();
+                    app.status_message =
+                        "No projects found. Use 'byte init' to create one.".to_string();
                 }
             }
+
+            // Load project states (git status, build state)
+            app.refresh_project_states();
         }
 
         app
@@ -230,7 +279,7 @@ impl App {
         config.add_workspace_path(path).map_err(|e| e.to_string())?;
 
         // Reload workspace directories and projects
-        self.reload_workspaces();
+        self.hotload();
 
         Ok(())
     }
@@ -240,11 +289,15 @@ impl App {
         let mut config = crate::config::Config::load().map_err(|e| e.to_string())?;
 
         // Remove old path and add new path
-        config.remove_workspace_path(old_path).map_err(|e| e.to_string())?;
-        config.add_workspace_path(new_path).map_err(|e| e.to_string())?;
+        config
+            .remove_workspace_path(old_path)
+            .map_err(|e| e.to_string())?;
+        config
+            .add_workspace_path(new_path)
+            .map_err(|e| e.to_string())?;
 
         // Reload workspace directories and projects
-        self.reload_workspaces();
+        self.hotload();
 
         Ok(())
     }
@@ -254,131 +307,207 @@ impl App {
         let mut config = crate::config::Config::load().map_err(|e| e.to_string())?;
 
         // Remove the path
-        config.remove_workspace_path(path).map_err(|e| e.to_string())?;
+        config
+            .remove_workspace_path(path)
+            .map_err(|e| e.to_string())?;
 
         // Reload workspace directories and projects
-        self.reload_workspaces();
+        self.hotload();
 
         Ok(())
     }
 
-    fn reload_workspaces(&mut self) {
-        // Reload config and projects (same logic as App::new())
-        if let Ok(config) = crate::config::Config::load() {
-            // Clear and reload workspace directories
-            self.workspace_directories.clear();
+    /// Refresh project states (called on hotload or manual refresh)
+    pub fn refresh_project_states(&mut self) {
+        self.project_states.clear();
 
-            let workspace_path = &config.global.workspace.path;
-            self.workspace_directories.push(WorkspaceDir {
-                path: workspace_path.clone(),
-                is_primary: true,
-                project_count: 0,
-            });
+        for project in &self.projects {
+            let state = get_project_state(&project.path);
+            self.project_states.insert(project.path.clone(), state);
+        }
 
-            for registered in &config.global.workspace.registered {
-                self.workspace_directories.push(WorkspaceDir {
-                    path: registered.clone(),
-                    is_primary: false,
-                    project_count: 0,
-                });
+        self.last_state_refresh = Instant::now();
+    }
+
+    /// Get cached state for current selected project
+    pub fn get_current_project_state(&self) -> Option<&ProjectState> {
+        let project = self.get_selected_project()?;
+        self.project_states.get(&project.path)
+    }
+
+    /// Check if a command is a build command
+    fn is_build_command(&self, command_str: &str) -> bool {
+        // Check if command matches a build task from current project
+        for cmd in &self.commands {
+            if cmd.name.starts_with("build: ") && cmd.command == command_str {
+                return true;
             }
+        }
+        false
+    }
 
-            if !self.workspace_directories.is_empty() {
-                let new_selected = self.selected_workspace.min(self.workspace_directories.len() - 1);
-                self.selected_workspace = new_selected;
-                self.workspace_list_state.select(Some(new_selected));
+    /// Extract task name from a build command
+    fn extract_task_name(&self, command_str: &str) -> Option<String> {
+        for cmd in &self.commands {
+            if cmd.command == command_str && cmd.name.starts_with("build: ") {
+                return Some(cmd.name.strip_prefix("build: ")?.to_string());
             }
+        }
+        None
+    }
 
-            // Rediscover projects
-            if let Ok(discovered) = crate::projects::discover_projects(&config.global) {
-                self.projects = discovered
-                    .into_iter()
-                    .map(|p| Project {
-                        name: p.config.project.name.clone(),
-                        description: p.config.project.description.clone().unwrap_or_else(|| {
-                            format!("{} project", p.config.project.project_type)
-                        }),
-                        drivers: vec![p.config.project.ecosystem],
-                        path: p.path.to_string_lossy().to_string(),
-                    })
-                    .collect();
+    fn handle_command_result(&mut self, result: CommandResult) {
+        // Update build state after execution (for build commands)
+        if result.is_build_cmd {
+            if let Some(task) = result.task_name {
+                let build_status = if result.success {
+                    BuildStatus::Success
+                } else {
+                    BuildStatus::Failed
+                };
 
-                // Update project counts
-                for workspace in &mut self.workspace_directories {
-                    let expanded_path = shellexpand::tilde(&workspace.path).to_string();
-                    crate::logger::info(&format!("[RELOAD] Counting projects for workspace: {}", expanded_path));
-                    for proj in &self.projects {
-                        crate::logger::info(&format!("[RELOAD]   Checking project: {} (starts_with? {})",
-                            proj.path, proj.path.starts_with(&expanded_path)));
-                    }
-                    workspace.project_count = self
-                        .projects
-                        .iter()
-                        .filter(|p| p.path.starts_with(&expanded_path))
-                        .count();
-                    crate::logger::info(&format!("[RELOAD] Final count for {}: {}", expanded_path, workspace.project_count));
-                }
+                let state = BuildState {
+                    timestamp: chrono::Utc::now().timestamp(),
+                    status: build_status,
+                    task,
+                };
+                let _ = state::build::save_build_state(&result.working_dir, state);
             }
+        }
+
+        // Show result in progress bar for 3 seconds
+        self.command_result_display = Some((result.success, Instant::now()));
+
+        if result.success {
+            self.status_message = format!("✓ {}", result.command);
+            crate::logger::info(&format!("[EXEC] Success: {}", result.command));
+            self.hotload();
+        } else {
+            self.status_message = format!("✗ Command failed");
+            crate::logger::info(&format!("[EXEC] Failed: {}", result.command));
         }
     }
 
     fn execute_command(&mut self, command_str: &str) {
-        // Expand tilde in working directory
-        let working_dir = shellexpand::tilde(&self.command_working_dir).to_string();
-
-        crate::logger::info(&format!("[EXEC] Executing: {} in {}", command_str, working_dir));
-
-        // Parse command into parts
-        let parts: Vec<&str> = command_str.split_whitespace().collect();
-
-        // Check if it's a byte init command
-        if parts.len() >= 4 && parts[0] == "byte" && parts[1] == "init" {
-            // Parse: byte init <ecosystem> <project_type> <name>
-            let ecosystem = parts[2];
-            let project_type = parts[3];
-            let name = if parts.len() > 4 {
-                parts[4]
-            } else {
-                "my-project" // Default name
-            };
-
-            // Call init_project directly
-            match crate::projects::init_project(&working_dir, ecosystem, project_type, name) {
-                Ok(project_path) => {
-                    self.status_message = format!("✓ Created project at {}", project_path.display());
-                    crate::logger::info(&format!("[EXEC] Success: Created {}", project_path.display()));
-                    // Reload projects to pick up newly created one
-                    self.reload_workspaces();
-                }
-                Err(e) => {
-                    self.status_message = format!("✗ Failed to create project: {}", e);
-                    crate::logger::info(&format!("[EXEC] Failed: {}", e));
-                }
-            }
+        // Determine working directory based on context
+        let working_dir = if let Some(project) = self.get_selected_project() {
+            // Project selected: run commands in project directory
+            project.path.clone()
         } else {
-            // For other commands, try to execute as shell command
-            use std::process::Command;
-            match Command::new("sh")
-                .arg("-c")
-                .arg(command_str)
-                .current_dir(&working_dir)
-                .status()
-            {
-                Ok(status) => {
-                    if status.success() {
-                        self.status_message = format!("✓ {}", command_str);
-                        crate::logger::info(&format!("[EXEC] Success: {}", command_str));
-                        self.reload_workspaces();
+            // No project selected: use target workspace (for init commands)
+            shellexpand::tilde(&self.get_target_workspace()).to_string()
+        };
+
+        crate::logger::info(&format!(
+            "[EXEC] Executing: {} in {}",
+            command_str, working_dir
+        ));
+
+        // Check if this is a build command
+        let is_build_cmd = self.is_build_command(command_str);
+        let task_name = if is_build_cmd {
+            self.extract_task_name(command_str)
+        } else {
+            None
+        };
+
+        // Save "Running" state before execution (for build commands)
+        if let (true, Some(task)) = (is_build_cmd, &task_name) {
+            let state = BuildState {
+                timestamp: chrono::Utc::now().timestamp(),
+                status: BuildStatus::Running,
+                task: task.clone(),
+            };
+            let _ = state::build::save_build_state(&working_dir, state);
+        }
+
+        // Start animation for ALL commands
+        self.executing_command = Some(command_str.to_string());
+        self.build_animation_frame = 0;
+        self.build_animation_start = Some(Instant::now());
+
+        // Spawn background thread to execute command
+        if let Some(tx) = self.command_tx.clone() {
+            let command = command_str.to_string();
+            let working_dir_clone = working_dir.clone();
+
+            std::thread::spawn(move || {
+                use std::process::Command;
+
+                // Parse command to check if it's a byte init command
+                let parts: Vec<&str> = command.split_whitespace().collect();
+                let is_byte_init = parts.len() >= 4 && parts[0] == "byte" && parts[1] == "init";
+
+                let (success, stdout, stderr) = if is_byte_init {
+                    // Handle byte init commands specially
+                    let ecosystem = parts[2];
+                    let project_type = parts[3];
+                    let name = if parts.len() > 4 {
+                        parts[4]
                     } else {
-                        self.status_message = format!("✗ Command failed with status: {}", status);
-                        crate::logger::info(&format!("[EXEC] Failed: {} (status: {})", command_str, status));
+                        "my-project"
+                    };
+
+                    match crate::projects::init_project(
+                        &working_dir_clone,
+                        ecosystem,
+                        project_type,
+                        name,
+                    ) {
+                        Ok(project_path) => {
+                            let msg = format!("Created project at {}", project_path.display());
+                            crate::logger::info(&format!("[EXEC] Success: {}", msg));
+                            (true, msg, String::new())
+                        }
+                        Err(e) => {
+                            let msg = format!("Failed to create project: {}", e);
+                            crate::logger::info(&format!("[EXEC] Failed: {}", msg));
+                            (false, String::new(), msg)
+                        }
                     }
-                }
-                Err(e) => {
-                    self.status_message = format!("✗ Error: {}", e);
-                    crate::logger::info(&format!("[EXEC] Error: {} - {}", command_str, e));
-                }
-            }
+                } else {
+                    // Execute regular shell command
+                    let output = Command::new("sh")
+                        .arg("-c")
+                        .arg(&command)
+                        .current_dir(&working_dir_clone)
+                        .output();
+
+                    match output {
+                        Ok(output) => {
+                            let success = output.status.success();
+                            let exit_code = output.status.code().unwrap_or(-1);
+                            let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+                            let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+
+                            // Log command output to dedicated category directory
+                            let _ = crate::logger::log_command_output(
+                                &working_dir_clone,
+                                &command,
+                                &stdout,
+                                &stderr,
+                                exit_code,
+                            );
+
+                            (success, stdout, stderr)
+                        }
+                        Err(e) => {
+                            let msg = format!("Command execution failed: {}", e);
+                            crate::logger::info(&format!("[EXEC] Error: {}", msg));
+                            (false, String::new(), msg)
+                        }
+                    }
+                };
+
+                // Send result back
+                let _ = tx.send(CommandResult {
+                    success,
+                    command,
+                    working_dir: working_dir_clone,
+                    is_build_cmd,
+                    task_name,
+                });
+            });
         }
     }
 
@@ -389,7 +518,15 @@ impl App {
             self.fuzzy_matches.clear();
             if let Some(home) = dirs::home_dir() {
                 self.fuzzy_matches.push("~".to_string());
-                for subdir in &["Desktop", "Documents", "Downloads", "Music", "Pictures", "Videos", "projects"] {
+                for subdir in &[
+                    "Desktop",
+                    "Documents",
+                    "Downloads",
+                    "Music",
+                    "Pictures",
+                    "Videos",
+                    "projects",
+                ] {
                     let path = home.join(subdir);
                     if path.exists() {
                         self.fuzzy_matches.push(format!("~/{}", subdir));
@@ -409,19 +546,24 @@ impl App {
                 (path, "")
             } else {
                 let parent = path.parent().unwrap_or(std::path::Path::new("."));
-                let filename = path.file_name()
-                    .and_then(|s| s.to_str())
-                    .unwrap_or("");
+                let filename = path.file_name().and_then(|s| s.to_str()).unwrap_or("");
                 (parent, filename)
             };
 
             // Read directory and collect matches
             if let Ok(entries) = std::fs::read_dir(search_dir) {
                 for entry in entries.filter_map(|e| e.ok()) {
-                    if entry.file_type().ok().map(|ft| ft.is_dir()).unwrap_or(false) {
+                    if entry
+                        .file_type()
+                        .ok()
+                        .map(|ft| ft.is_dir())
+                        .unwrap_or(false)
+                    {
                         if let Ok(name) = entry.file_name().into_string() {
                             // Fuzzy match: check if all chars of prefix appear in order
-                            if prefix.is_empty() || fuzzy_match(&name.to_lowercase(), &prefix.to_lowercase()) {
+                            if prefix.is_empty()
+                                || fuzzy_match(&name.to_lowercase(), &prefix.to_lowercase())
+                            {
                                 let full_path = if search_dir.to_str() == Some(".") {
                                     name.clone()
                                 } else {
@@ -476,9 +618,7 @@ impl App {
             (path, "")
         } else {
             let parent = path.parent().unwrap_or(Path::new("."));
-            let filename = path.file_name()
-                .and_then(|s| s.to_str())
-                .unwrap_or("");
+            let filename = path.file_name().and_then(|s| s.to_str()).unwrap_or("");
             (parent, filename)
         };
 
@@ -493,12 +633,7 @@ impl App {
 
         let mut matches: Vec<String> = entries
             .filter_map(|e| e.ok())
-            .filter(|e| {
-                e.file_type()
-                    .ok()
-                    .map(|ft| ft.is_dir())
-                    .unwrap_or(false)
-            })
+            .filter(|e| e.file_type().ok().map(|ft| ft.is_dir()).unwrap_or(false))
             .filter_map(|e| e.file_name().into_string().ok())
             .filter(|name| name.starts_with(prefix))
             .collect();
@@ -544,6 +679,15 @@ impl App {
     pub fn handle_key(&mut self, key: KeyCode) {
         match key {
             KeyCode::Char('q') | KeyCode::Char('Q') => self.quit(),
+            KeyCode::Char('r') | KeyCode::Char('R')
+                if !matches!(
+                    self.input_mode,
+                    InputMode::AddingDirectory | InputMode::EditingCommand
+                ) =>
+            {
+                self.hotload();
+                self.status_message = "✓ Reloaded all state from disk".to_string();
+            }
             // View switching keys - only when NOT in input mode
             KeyCode::Char('1') if !matches!(self.input_mode, InputMode::AddingDirectory) => {
                 self.current_view = View::ProjectBrowser;
@@ -551,10 +695,12 @@ impl App {
             }
             KeyCode::Char('2') if !matches!(self.input_mode, InputMode::AddingDirectory) => {
                 self.current_view = View::CommandPalette;
+                self.update_commands();
                 self.status_message = "Viewing commands".to_string();
             }
             KeyCode::Char('3') if !matches!(self.input_mode, InputMode::AddingDirectory) => {
                 self.current_view = View::Detail;
+                self.selected_log = 0; // Reset log selection
                 self.status_message = format!(
                     "Viewing details for: {}",
                     self.projects
@@ -575,14 +721,17 @@ impl App {
                     self.fuzzy_browsing = false;
                     self.editing_workspace_index = None;
                     self.update_fuzzy_matches();
-                    self.status_message = "Type path, use ↑↓ to browse matches, Tab/Enter to select".to_string();
+                    self.status_message =
+                        "Type path, use ↑↓ to browse matches, Tab/Enter to select".to_string();
                 }
             }
             KeyCode::Char('e') if matches!(self.current_view, View::WorkspaceManager) => {
                 if matches!(self.input_mode, InputMode::Normal) {
-                    if let Some(workspace) = self.workspace_directories.get(self.selected_workspace) {
+                    if let Some(workspace) = self.workspace_directories.get(self.selected_workspace)
+                    {
                         if workspace.is_primary {
-                            self.status_message = "✗ Cannot edit primary workspace (use config file)".to_string();
+                            self.status_message =
+                                "✗ Cannot edit primary workspace (use config file)".to_string();
                         } else {
                             // Enter edit mode with current path pre-filled
                             self.input_mode = InputMode::AddingDirectory;
@@ -590,14 +739,17 @@ impl App {
                             self.fuzzy_browsing = false;
                             self.editing_workspace_index = Some(self.selected_workspace);
                             self.update_fuzzy_matches();
-                            self.status_message = "Editing path - use ↑↓ to browse matches, Tab/Enter to save".to_string();
+                            self.status_message =
+                                "Editing path - use ↑↓ to browse matches, Tab/Enter to save"
+                                    .to_string();
                         }
                     }
                 }
             }
             KeyCode::Char('d') if matches!(self.current_view, View::WorkspaceManager) => {
                 if matches!(self.input_mode, InputMode::Normal) {
-                    if let Some(workspace) = self.workspace_directories.get(self.selected_workspace) {
+                    if let Some(workspace) = self.workspace_directories.get(self.selected_workspace)
+                    {
                         if workspace.is_primary {
                             self.status_message = "✗ Cannot remove primary workspace".to_string();
                         } else {
@@ -614,13 +766,49 @@ impl App {
                     }
                 }
             }
-            KeyCode::Esc if matches!(self.input_mode, InputMode::AddingDirectory | InputMode::EditingCommand) => {
+            KeyCode::Char('t')
+                if matches!(self.current_view, View::CommandPalette)
+                    && matches!(self.input_mode, InputMode::Normal) =>
+            {
+                self.cycle_target_workspace();
+            }
+            KeyCode::Char('l')
+                if matches!(self.current_view, View::Detail)
+                    && matches!(self.input_mode, InputMode::Normal) =>
+            {
+                // Open selected log file in external editor
+                if let Some(project) = self.get_selected_project() {
+                    let logs = crate::logger::get_recent_logs(&project.path, 5);
+                    if let Some(log) = logs.get(self.selected_log) {
+                        let editor = crate::logger::get_default_editor();
+                        let log_path = log.path.to_string_lossy().to_string();
+
+                        // Set pending editor request (will be handled in main loop)
+                        self.pending_editor = Some((editor, log_path));
+                    } else {
+                        self.status_message = "✗ No logs available".to_string();
+                    }
+                } else {
+                    self.status_message = "✗ No project selected".to_string();
+                }
+            }
+            KeyCode::Esc
+                if matches!(
+                    self.input_mode,
+                    InputMode::AddingDirectory | InputMode::EditingCommand
+                ) =>
+            {
                 self.input_mode = InputMode::Normal;
                 self.input_buffer.clear();
                 self.editing_workspace_index = None;
                 self.status_message = "Cancelled".to_string();
             }
-            KeyCode::Backspace if matches!(self.input_mode, InputMode::AddingDirectory | InputMode::EditingCommand) => {
+            KeyCode::Backspace
+                if matches!(
+                    self.input_mode,
+                    InputMode::AddingDirectory | InputMode::EditingCommand
+                ) =>
+            {
                 self.input_buffer.pop();
                 if matches!(self.input_mode, InputMode::AddingDirectory) {
                     self.fuzzy_browsing = false;
@@ -645,7 +833,12 @@ impl App {
                     self.update_fuzzy_matches();
                 }
             }
-            KeyCode::Char(c) if matches!(self.input_mode, InputMode::AddingDirectory | InputMode::EditingCommand) => {
+            KeyCode::Char(c)
+                if matches!(
+                    self.input_mode,
+                    InputMode::AddingDirectory | InputMode::EditingCommand
+                ) =>
+            {
                 self.input_buffer.push(c);
                 if matches!(self.input_mode, InputMode::AddingDirectory) {
                     self.fuzzy_browsing = false;
@@ -654,7 +847,9 @@ impl App {
             }
             KeyCode::Up => {
                 // Handle fuzzy match navigation when in input mode
-                if matches!(self.input_mode, InputMode::AddingDirectory) && !self.fuzzy_matches.is_empty() {
+                if matches!(self.input_mode, InputMode::AddingDirectory)
+                    && !self.fuzzy_matches.is_empty()
+                {
                     self.fuzzy_browsing = true;
                     if self.fuzzy_selected > 0 {
                         self.fuzzy_selected -= 1;
@@ -678,16 +873,24 @@ impl App {
                         View::WorkspaceManager => {
                             if self.selected_workspace > 0 {
                                 self.selected_workspace -= 1;
-                                self.workspace_list_state.select(Some(self.selected_workspace));
+                                self.workspace_list_state
+                                    .select(Some(self.selected_workspace));
                             }
                         }
-                        View::Detail => {}
+                        View::Detail => {
+                            // Navigate through logs
+                            if self.selected_log > 0 {
+                                self.selected_log -= 1;
+                            }
+                        }
                     }
                 }
-            },
+            }
             KeyCode::Down => {
                 // Handle fuzzy match navigation when in input mode
-                if matches!(self.input_mode, InputMode::AddingDirectory) && !self.fuzzy_matches.is_empty() {
+                if matches!(self.input_mode, InputMode::AddingDirectory)
+                    && !self.fuzzy_matches.is_empty()
+                {
                     self.fuzzy_browsing = true;
                     if self.fuzzy_selected < self.fuzzy_matches.len().saturating_sub(1) {
                         self.fuzzy_selected += 1;
@@ -698,28 +901,43 @@ impl App {
                             if self.selected_project < self.projects.len().saturating_sub(1) {
                                 self.selected_project += 1;
                                 self.project_list_state.select(Some(self.selected_project));
-                                self.status_message =
-                                    format!("Selected: {}", self.projects[self.selected_project].name);
+                                self.status_message = format!(
+                                    "Selected: {}",
+                                    self.projects[self.selected_project].name
+                                );
                             }
                         }
                         View::CommandPalette => {
                             if self.selected_command < self.commands.len().saturating_sub(1) {
                                 self.selected_command += 1;
                                 self.command_list_state.select(Some(self.selected_command));
-                                self.status_message =
-                                    format!("Selected: {}", self.commands[self.selected_command].name);
+                                self.status_message = format!(
+                                    "Selected: {}",
+                                    self.commands[self.selected_command].name
+                                );
                             }
                         }
                         View::WorkspaceManager => {
-                            if self.selected_workspace < self.workspace_directories.len().saturating_sub(1) {
+                            if self.selected_workspace
+                                < self.workspace_directories.len().saturating_sub(1)
+                            {
                                 self.selected_workspace += 1;
-                                self.workspace_list_state.select(Some(self.selected_workspace));
+                                self.workspace_list_state
+                                    .select(Some(self.selected_workspace));
                             }
                         }
-                        View::Detail => {}
+                        View::Detail => {
+                            // Navigate through logs
+                            if let Some(project) = self.get_selected_project() {
+                                let log_count = crate::logger::get_recent_logs(&project.path, 5).len();
+                                if self.selected_log < log_count.saturating_sub(1) {
+                                    self.selected_log += 1;
+                                }
+                            }
+                        }
                     }
                 }
-            },
+            }
             KeyCode::Enter => match self.current_view {
                 View::ProjectBrowser => {
                     if let Some(project) = self.projects.get(self.selected_project) {
@@ -740,12 +958,15 @@ impl App {
                         // Enter edit mode with command pre-filled
                         self.input_mode = InputMode::EditingCommand;
                         self.input_buffer = cmd.command.clone();
-                        self.status_message = format!("Edit command (working dir: {}) then press Enter to execute", self.command_working_dir);
+                        self.status_message = format!(
+                            "Edit command (working dir: {}) then press Enter to execute",
+                            self.get_target_workspace()
+                        );
                     }
                 }
                 View::WorkspaceManager => {
                     if matches!(self.input_mode, InputMode::AddingDirectory) {
-                        let path = self.input_buffer.trim().to_string();
+                        let path = self.input_buffer.trim().trim_end_matches('/').to_string();
                         if !path.is_empty() {
                             // Check if we're editing or adding
                             if let Some(index) = self.editing_workspace_index {
@@ -795,6 +1016,203 @@ impl App {
     pub fn get_selected_command(&self) -> Option<&Command> {
         self.commands.get(self.selected_command)
     }
+
+    pub fn get_target_workspace(&self) -> String {
+        self.workspace_directories
+            .get(self.selected_target_workspace)
+            .map(|w| w.path.clone())
+            .unwrap_or_else(|| "~/projects".to_string())
+    }
+
+    pub fn cycle_target_workspace(&mut self) {
+        if !self.workspace_directories.is_empty() {
+            self.selected_target_workspace =
+                (self.selected_target_workspace + 1) % self.workspace_directories.len();
+            self.status_message = format!("Target: {}", self.get_target_workspace());
+        }
+    }
+
+    pub fn get_workspace_for_project(&self, project_path: &str) -> String {
+        // Find which workspace this project belongs to
+        for workspace in &self.workspace_directories {
+            let expanded_workspace = shellexpand::tilde(&workspace.path).to_string();
+            if project_path.starts_with(&expanded_workspace) {
+                return workspace.path.clone();
+            }
+        }
+        // Fallback to showing the path
+        project_path.to_string()
+    }
+
+    /// Hot reload all state from disk
+    /// Called on file changes (via watcher) or manual refresh (r key)
+    pub fn hotload(&mut self) {
+        crate::logger::info("[HOTLOAD] Reloading all state from disk");
+
+        // Reload config and rediscover projects
+        if let Ok(config) = crate::config::Config::load() {
+            // Clear and reload workspace directories
+            self.workspace_directories.clear();
+
+            let workspace_path = &config.global.workspace.path;
+            self.workspace_directories.push(WorkspaceDir {
+                path: workspace_path.clone(),
+                is_primary: true,
+                project_count: 0,
+            });
+
+            for registered in &config.global.workspace.registered {
+                self.workspace_directories.push(WorkspaceDir {
+                    path: registered.clone(),
+                    is_primary: false,
+                    project_count: 0,
+                });
+            }
+
+            // Rediscover all projects
+            if let Ok(discovered) = crate::projects::discover_projects(&config.global) {
+                self.projects = discovered
+                    .into_iter()
+                    .map(|p| Project {
+                        name: p.config.project.name.clone(),
+                        description: p.config.project.description.clone().unwrap_or_else(|| {
+                            format!("{} project", p.config.project.project_type)
+                        }),
+                        drivers: vec![p.config.project.ecosystem],
+                        path: p.path.to_string_lossy().to_string(),
+                    })
+                    .collect();
+
+                // Update project counts for workspaces
+                for workspace in &mut self.workspace_directories {
+                    let expanded_path = shellexpand::tilde(&workspace.path).to_string();
+                    let normalized_workspace = expanded_path.trim_end_matches('/').to_lowercase();
+                    workspace.project_count = self
+                        .projects
+                        .iter()
+                        .filter(|p| {
+                            let normalized_proj = p.path.trim_end_matches('/').to_lowercase();
+                            normalized_proj.starts_with(&normalized_workspace)
+                        })
+                        .count();
+                }
+
+                // Update UI state
+                if !self.projects.is_empty() {
+                    // Keep selection valid
+                    if self.selected_project >= self.projects.len() {
+                        self.selected_project = self.projects.len() - 1;
+                    }
+                    self.project_list_state.select(Some(self.selected_project));
+                } else {
+                    self.selected_project = 0;
+                    self.project_list_state.select(None);
+                }
+            }
+
+            // Update workspace list state
+            if !self.workspace_directories.is_empty() {
+                if self.selected_workspace >= self.workspace_directories.len() {
+                    self.selected_workspace = self.workspace_directories.len() - 1;
+                }
+                self.workspace_list_state
+                    .select(Some(self.selected_workspace));
+            }
+        }
+
+        // Reload commands for current context
+        self.update_commands();
+
+        // Refresh project states (git status, build state)
+        self.refresh_project_states();
+
+        crate::logger::info("[HOTLOAD] Reload complete");
+    }
+
+    pub fn update_commands(&mut self) {
+        self.commands.clear();
+
+        // Get project path if a project is selected (clone to avoid borrow issues)
+        let project_path = self.get_selected_project().map(|p| p.path.clone());
+
+        if let Some(path) = project_path {
+            // Project selected: load project-specific commands
+            self.load_project_commands(&path);
+        } else {
+            // No project selected: show init commands
+            self.load_init_commands();
+        }
+
+        // Reset selection
+        if !self.commands.is_empty() {
+            self.command_list_state.select(Some(0));
+            self.selected_command = 0;
+        }
+    }
+
+    fn load_init_commands(&mut self) {
+        self.commands = vec![
+            Command {
+                name: "init go cli <name>".to_string(),
+                description: "Initialize Go CLI project".to_string(),
+                command: "byte init go cli my-project".to_string(),
+            },
+            Command {
+                name: "init bun web <name>".to_string(),
+                description: "Initialize Bun web application".to_string(),
+                command: "byte init bun web my-app".to_string(),
+            },
+            Command {
+                name: "init rust cli <name>".to_string(),
+                description: "Initialize Rust CLI project".to_string(),
+                command: "byte init rust cli my-tool".to_string(),
+            },
+        ];
+    }
+
+    fn load_project_commands(&mut self, project_path: &str) {
+        use std::path::PathBuf;
+
+        let config_path = PathBuf::from(project_path).join("byte.toml");
+
+        if let Ok(content) = std::fs::read_to_string(&config_path) {
+            if let Ok(config) = toml::from_str::<crate::config::ProjectConfig>(&content) {
+                // Add build commands
+                if let Some(build_cmds) = config.build {
+                    for (name, cmd) in build_cmds.iter() {
+                        self.commands.push(Command {
+                            name: format!("build: {}", name),
+                            description: format!("Run build task: {}", name),
+                            command: cmd.clone(),
+                        });
+                    }
+                }
+
+                // Add custom commands
+                if let Some(custom_cmds) = config.commands {
+                    for (name, cmd) in custom_cmds.iter() {
+                        self.commands.push(Command {
+                            name: name.clone(),
+                            description: format!("Run: {}", name),
+                            command: cmd.clone(),
+                        });
+                    }
+                }
+            }
+        }
+
+        // Add common git commands
+        self.commands.push(Command {
+            name: "git status".to_string(),
+            description: "Show git status".to_string(),
+            command: "git status".to_string(),
+        });
+        self.commands.push(Command {
+            name: "git diff".to_string(),
+            description: "Show uncommitted changes".to_string(),
+            command: "git diff".to_string(),
+        });
+    }
 }
 
 pub fn run() -> anyhow::Result<()> {
@@ -805,7 +1223,18 @@ pub fn run() -> anyhow::Result<()> {
     let mut terminal = setup_terminal()?;
     let mut app = App::new();
 
-    let res = run_app(&mut terminal, &mut app);
+    // Set up file watcher
+    let (file_tx, file_rx) = std::sync::mpsc::channel();
+    let mut watcher = setup_file_watcher(file_tx, &app)?;
+
+    // Set up command execution channel
+    let (cmd_tx, cmd_rx) = std::sync::mpsc::channel();
+    app.command_tx = Some(cmd_tx);
+
+    let res = run_app(&mut terminal, &mut app, file_rx, cmd_rx);
+
+    // Clean up watcher
+    drop(watcher);
 
     restore_terminal(&mut terminal)?;
 
@@ -814,6 +1243,81 @@ pub fn run() -> anyhow::Result<()> {
 
 fn is_tty() -> bool {
     atty::is(atty::Stream::Stdout)
+}
+
+fn setup_file_watcher(
+    tx: std::sync::mpsc::Sender<()>,
+    app: &App,
+) -> anyhow::Result<
+    notify_debouncer_full::Debouncer<notify::RecommendedWatcher, notify_debouncer_full::FileIdMap>,
+> {
+    use notify::{RecursiveMode, Watcher};
+    use notify_debouncer_full::new_debouncer;
+    use std::time::Duration;
+
+    // Create debounced watcher (500ms debounce)
+    let mut debouncer = new_debouncer(
+        Duration::from_millis(500),
+        None,
+        move |result: Result<Vec<notify_debouncer_full::DebouncedEvent>, Vec<notify::Error>>| {
+            match result {
+                Ok(events) => {
+                    // Check if any event is for a byte.toml file
+                    for event in events {
+                        let path = event.paths.first();
+                        if let Some(path) = path {
+                            if path.file_name().and_then(|n| n.to_str()) == Some("byte.toml")
+                                || path.file_name().and_then(|n| n.to_str()) == Some("config.toml")
+                            {
+                                crate::logger::info(&format!(
+                                    "[WATCHER] Detected change: {:?}",
+                                    path
+                                ));
+                                // Notify main loop to reload
+                                let _ = tx.send(());
+                                break;
+                            }
+                        }
+                    }
+                }
+                Err(errors) => {
+                    for error in errors {
+                        crate::logger::info(&format!("[WATCHER] Error: {:?}", error));
+                    }
+                }
+            }
+        },
+    )?;
+
+    // Watch all workspace directories
+    for workspace in &app.workspace_directories {
+        let expanded = shellexpand::tilde(&workspace.path).to_string();
+        if let Err(e) = debouncer
+            .watcher()
+            .watch(std::path::Path::new(&expanded), RecursiveMode::Recursive)
+        {
+            crate::logger::info(&format!("[WATCHER] Failed to watch {}: {}", expanded, e));
+        } else {
+            crate::logger::info(&format!("[WATCHER] Watching: {}", expanded));
+        }
+    }
+
+    // Watch global config directory
+    if let Some(config_dir) = dirs::config_dir() {
+        let byte_config = config_dir.join("byte");
+        if byte_config.exists() {
+            if let Err(e) = debouncer
+                .watcher()
+                .watch(&byte_config, RecursiveMode::NonRecursive)
+            {
+                crate::logger::info(&format!("[WATCHER] Failed to watch config: {}", e));
+            } else {
+                crate::logger::info(&format!("[WATCHER] Watching config: {:?}", byte_config));
+            }
+        }
+    }
+
+    Ok(debouncer)
 }
 
 fn setup_terminal() -> anyhow::Result<Terminal<CrosstermBackend<io::Stdout>>> {
@@ -828,6 +1332,32 @@ fn setup_terminal() -> anyhow::Result<Terminal<CrosstermBackend<io::Stdout>>> {
 fn restore_terminal(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> anyhow::Result<()> {
     disable_raw_mode()?;
     execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
+    Ok(())
+}
+
+/// Suspend TUI, run interactive command with terminal access, then resume TUI
+fn run_interactive_command(
+    terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
+    editor: &str,
+    file_path: &str,
+) -> anyhow::Result<()> {
+    use std::process::Command;
+
+    // Suspend TUI
+    restore_terminal(terminal)?;
+
+    // Run editor with inherited stdin/stdout/stderr
+    let status = Command::new(editor)
+        .arg(file_path)
+        .status()?;
+
+    // Resume TUI
+    *terminal = setup_terminal()?;
+
+    if !status.success() {
+        anyhow::bail!("Editor exited with error");
+    }
+
     Ok(())
 }
 
@@ -855,7 +1385,15 @@ fn run_fuzzy_picker(current_input: &str) -> Option<String> {
         candidates.push("~".to_string());
 
         // Common subdirectories
-        for subdir in &["Desktop", "Documents", "Downloads", "Music", "Pictures", "Videos", "projects"] {
+        for subdir in &[
+            "Desktop",
+            "Documents",
+            "Downloads",
+            "Music",
+            "Pictures",
+            "Videos",
+            "projects",
+        ] {
             let path = home.join(subdir);
             if path.exists() {
                 candidates.push(format!("~/{}", subdir));
@@ -875,9 +1413,15 @@ fn run_fuzzy_picker(current_input: &str) -> Option<String> {
             let expanded = shellexpand::tilde(current_input).to_string();
             if let Ok(entries) = std::fs::read_dir(&expanded) {
                 for entry in entries.filter_map(|e| e.ok()) {
-                    if entry.file_type().ok().map(|ft| ft.is_dir()).unwrap_or(false) {
+                    if entry
+                        .file_type()
+                        .ok()
+                        .map(|ft| ft.is_dir())
+                        .unwrap_or(false)
+                    {
                         if let Ok(name) = entry.file_name().into_string() {
-                            let full_path = format!("{}/{}", current_input.trim_end_matches('/'), name);
+                            let full_path =
+                                format!("{}/{}", current_input.trim_end_matches('/'), name);
                             candidates.push(full_path);
                         }
                     }
@@ -916,25 +1460,72 @@ fn run_fuzzy_picker(current_input: &str) -> Option<String> {
         return None;
     }
 
-    output.selected_items.first().map(|item| {
-        item.output().to_string()
-    })
+    output
+        .selected_items
+        .first()
+        .map(|item| item.output().to_string())
 }
 
 fn run_app(
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
     app: &mut App,
+    file_rx: std::sync::mpsc::Receiver<()>,
+    cmd_rx: std::sync::mpsc::Receiver<CommandResult>,
 ) -> anyhow::Result<()> {
     while !app.should_quit {
         terminal.draw(|f| ui(f, app))?;
 
-        if event::poll(Duration::from_millis(250))? {
+        // Update animation frame if command is executing
+        if app.executing_command.is_some() {
+            app.build_animation_frame += 1;
+        }
+
+        // Auto-dismiss command result display after 3 seconds
+        if let Some((_, timestamp)) = app.command_result_display {
+            if timestamp.elapsed() >= Duration::from_secs(3) {
+                app.command_result_display = None;
+            }
+        }
+
+        // Check for command completion (non-blocking)
+        if let Ok(result) = cmd_rx.try_recv() {
+            // Store the result but keep animating for minimum duration
+            app.pending_result = Some(result);
+        }
+
+        // Process pending result after minimum animation duration (500ms)
+        if let Some(_) = &app.pending_result {
+            if let Some(start_time) = app.build_animation_start {
+                let elapsed = start_time.elapsed();
+                if elapsed >= Duration::from_millis(500) {
+                    // Minimum animation time has passed, process result
+                    let result = app.pending_result.take().unwrap();
+                    app.executing_command = None;
+                    app.handle_command_result(result);
+                }
+            } else {
+                // No start time? Process immediately
+                let result = app.pending_result.take().unwrap();
+                app.executing_command = None;
+                app.handle_command_result(result);
+            }
+        }
+
+        // Check for file system events (non-blocking)
+        if let Ok(_) = file_rx.try_recv() {
+            app.hotload();
+            app.status_message = "✓ Auto-reloaded (file changed)".to_string();
+        }
+
+        if event::poll(Duration::from_millis(50))? {
             let event = event::read()?;
             if let Event::Key(key) = event {
                 // Handle Ctrl+D specially for fuzzy picker
                 if matches!(app.input_mode, InputMode::AddingDirectory)
                     && key.code == KeyCode::Char('d')
-                    && key.modifiers.contains(crossterm::event::KeyModifiers::CONTROL)
+                    && key
+                        .modifiers
+                        .contains(crossterm::event::KeyModifiers::CONTROL)
                 {
                     app.launch_fuzzy_picker = true;
                 } else {
@@ -960,6 +1551,18 @@ fn run_app(
 
             // Re-setup terminal
             *terminal = setup_terminal()?;
+        }
+
+        // Handle pending editor request (suspend TUI and run editor)
+        if let Some((editor, file_path)) = app.pending_editor.take() {
+            match run_interactive_command(terminal, &editor, &file_path) {
+                Ok(_) => {
+                    app.status_message = format!("✓ Closed {}", editor);
+                }
+                Err(e) => {
+                    app.status_message = format!("✗ Editor error: {}", e);
+                }
+            }
         }
     }
 
@@ -1020,6 +1623,11 @@ fn ui(f: &mut Frame, app: &App) {
 
     // Footer
     render_footer(f, chunks[3], app);
+
+    // Horizontal progress bar on right side (if command is executing or showing result)
+    if app.executing_command.is_some() || app.command_result_display.is_some() {
+        render_progress_bar(f, f.area(), app);
+    }
 }
 
 fn render_tab_bar(f: &mut Frame, area: ratatui::layout::Rect, app: &App) {
@@ -1064,13 +1672,32 @@ fn render_tab_bar(f: &mut Frame, area: ratatui::layout::Rect, app: &App) {
         } else {
             spans.push(Span::styled(
                 *key,
-                Style::default().fg(theme::TEXT_TERTIARY),
+                Style::default().fg(theme::TEXT_SECONDARY),
             ));
             spans.push(Span::raw(" "));
             spans.push(Span::styled(
                 *label,
-                Style::default().fg(theme::TEXT_TERTIARY),
+                Style::default().fg(theme::TEXT_SECONDARY),
             ));
+        }
+    }
+
+    // Add selected project on the right side
+    if let Some(project) = app.get_selected_project() {
+        // Calculate padding to right-align the project name
+        let tabs_text: String = spans.iter().map(|s| s.content.as_ref()).collect();
+        let tabs_len = tabs_text.len();
+        let project_text = format!("Project: {}", project.name);
+        let available_width = area.width as usize;
+
+        if tabs_len + project_text.len() + 4 < available_width {
+            let padding_len = available_width - tabs_len - project_text.len() - 2;
+            spans.push(Span::raw(" ".repeat(padding_len)));
+            spans.push(Span::styled(
+                project_text,
+                Style::default().fg(theme::TEXT_SECONDARY),
+            ));
+            spans.push(Span::raw("  "));
         }
     }
 
@@ -1094,31 +1721,14 @@ fn render_footer(f: &mut Frame, area: ratatui::layout::Rect, app: &App) {
             Span::raw("  "),
             Span::styled("│", Style::default().fg(theme::SEPARATOR)),
             Span::raw("  "),
-            Span::styled(
-                "?",
-                Style::default()
-                    .fg(theme::TEXT_DIM)
-                    .add_modifier(Modifier::DIM),
-            ),
-            Span::styled(
-                " help",
-                Style::default()
-                    .fg(theme::TEXT_DIM)
-                    .add_modifier(Modifier::DIM),
-            ),
+            Span::styled("?", Style::default().fg(theme::TEXT_SECONDARY)),
+            Span::styled(" help", Style::default().fg(theme::TEXT_SECONDARY)),
             Span::raw("  "),
-            Span::styled(
-                "q",
-                Style::default()
-                    .fg(theme::TEXT_DIM)
-                    .add_modifier(Modifier::DIM),
-            ),
-            Span::styled(
-                " quit",
-                Style::default()
-                    .fg(theme::TEXT_DIM)
-                    .add_modifier(Modifier::DIM),
-            ),
+            Span::styled("r", Style::default().fg(theme::TEXT_SECONDARY)),
+            Span::styled(" reload", Style::default().fg(theme::TEXT_SECONDARY)),
+            Span::raw("  "),
+            Span::styled("q", Style::default().fg(theme::TEXT_SECONDARY)),
+            Span::styled(" quit", Style::default().fg(theme::TEXT_SECONDARY)),
         ]),
     ])
     .alignment(Alignment::Left);
@@ -1131,12 +1741,16 @@ fn render_project_browser(f: &mut Frame, area: ratatui::layout::Rect, app: &App)
         vertical: 1,
     });
 
-    // Title
-    let title_area = Layout::default()
+    // Split into title and content
+    let chunks = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Length(2), Constraint::Min(0)])
+        .constraints([
+            Constraint::Length(2), // Title
+            Constraint::Min(0),    // Project list
+        ])
         .split(inner_area);
 
+    // Title
     let title = Paragraph::new(vec![
         Line::from(vec![
             Span::styled(
@@ -1148,14 +1762,14 @@ fn render_project_browser(f: &mut Frame, area: ratatui::layout::Rect, app: &App)
             Span::raw("  "),
             Span::styled(
                 format!("{}", app.projects.len()),
-                Style::default().fg(theme::TEXT_TERTIARY),
+                Style::default().fg(theme::TEXT_SECONDARY),
             ),
         ]),
         Line::from(""),
     ]);
-    f.render_widget(title, title_area[0]);
+    f.render_widget(title, chunks[0]);
 
-    // Project list
+    // Project list with table layout: Project (left) | Location (right)
     let items: Vec<ListItem> = app
         .projects
         .iter()
@@ -1170,10 +1784,26 @@ fn render_project_browser(f: &mut Frame, area: ratatui::layout::Rect, app: &App)
                 .collect::<Vec<_>>()
                 .join(" ");
 
+            // Calculate column widths (60% project, 40% location)
+            let total_width = inner_area.width.saturating_sub(4) as usize; // Account for padding
+            let project_width = (total_width * 60) / 100;
+            let location_width = total_width.saturating_sub(project_width);
+
+            // Show workspace instead of full path
+            let workspace_path = app.get_workspace_for_project(&project.path);
+            let display_path = if workspace_path.len() > location_width {
+                let start = workspace_path.len() - location_width + 1;
+                format!("…{}", &workspace_path[start..])
+            } else {
+                workspace_path
+            };
+
+            // Line 1: Name (left) | Path (right)
+            let name_text = format!("{:width$}", project.name, width = project_width);
             let line1 = vec![
                 Span::raw("  "),
                 Span::styled(
-                    project.name.clone(),
+                    name_text,
                     Style::default()
                         .fg(if is_selected {
                             theme::ACCENT
@@ -1186,24 +1816,30 @@ fn render_project_browser(f: &mut Frame, area: ratatui::layout::Rect, app: &App)
                             Modifier::empty()
                         }),
                 ),
+                Span::styled(display_path, Style::default().fg(theme::TEXT_SECONDARY)),
             ];
 
+            // Line 2: Description (left) | empty (right)
             let line2 = vec![
                 Span::raw("  "),
                 Span::styled(
                     project.description.clone(),
                     Style::default().fg(theme::TEXT_SECONDARY),
                 ),
-                Span::raw("  "),
-                Span::styled(
-                    drivers_display,
-                    Style::default()
-                        .fg(theme::TEXT_TERTIARY)
-                        .add_modifier(Modifier::DIM),
-                ),
             ];
 
-            let content = vec![Line::from(line1), Line::from(line2), Line::from("")];
+            // Line 3: Ecosystem tags (left) | empty (right)
+            let line3 = vec![
+                Span::raw("  "),
+                Span::styled(drivers_display, Style::default().fg(theme::TEXT_SECONDARY)),
+            ];
+
+            let content = vec![
+                Line::from(line1),
+                Line::from(line2),
+                Line::from(line3),
+                Line::from(""),
+            ];
 
             ListItem::new(content)
         })
@@ -1215,7 +1851,7 @@ fn render_project_browser(f: &mut Frame, area: ratatui::layout::Rect, app: &App)
         .highlight_symbol("▸ ");
 
     let mut state = app.project_list_state.clone();
-    f.render_stateful_widget(list, title_area[1], &mut state);
+    f.render_stateful_widget(list, chunks[1], &mut state);
 }
 
 fn render_command_palette(f: &mut Frame, area: ratatui::layout::Rect, app: &App) {
@@ -1247,14 +1883,14 @@ fn render_command_palette(f: &mut Frame, area: ratatui::layout::Rect, app: &App)
             Span::raw("  "),
             Span::styled(
                 format!("{}", app.commands.len()),
-                Style::default().fg(theme::TEXT_TERTIARY),
+                Style::default().fg(theme::TEXT_SECONDARY),
             ),
         ]),
         Line::from(""),
     ]);
     f.render_widget(title, chunks[0]);
 
-    // Command list
+    // Command list with table layout: Command (left) | Target (right)
     let items: Vec<ListItem> = app
         .commands
         .iter()
@@ -1262,33 +1898,57 @@ fn render_command_palette(f: &mut Frame, area: ratatui::layout::Rect, app: &App)
         .map(|(i, cmd)| {
             let is_selected = i == app.selected_command;
 
-            let content = vec![
-                Line::from(vec![
-                    Span::raw("  "),
-                    Span::styled(
-                        cmd.name.clone(),
-                        Style::default()
-                            .fg(if is_selected {
-                                theme::ACCENT
-                            } else {
-                                theme::TEXT_PRIMARY
-                            })
-                            .add_modifier(if is_selected {
-                                Modifier::BOLD
-                            } else {
-                                Modifier::empty()
-                            }),
-                    ),
-                ]),
-                Line::from(vec![
-                    Span::raw("  "),
-                    Span::styled(
-                        cmd.description.clone(),
-                        Style::default().fg(theme::TEXT_SECONDARY),
-                    ),
-                ]),
-                Line::from(""),
+            // Calculate column widths (65% command, 35% target)
+            let total_width = inner_area.width.saturating_sub(4) as usize;
+            let command_width = (total_width * 65) / 100;
+            let target_width = total_width.saturating_sub(command_width);
+
+            // Truncate target path to fit
+            // Show project's path when project selected, otherwise target workspace
+            let target_path = if let Some(project) = app.get_selected_project() {
+                project.path.clone()
+            } else {
+                app.get_target_workspace()
+            };
+
+            let display_target = if target_path.len() > target_width {
+                let start = target_path.len() - target_width + 1;
+                format!("…{}", &target_path[start..])
+            } else {
+                target_path
+            };
+
+            // Line 1: Command name (left) | Target directory (right)
+            let name_text = format!("{:width$}", cmd.name, width = command_width);
+            let line1 = vec![
+                Span::raw("  "),
+                Span::styled(
+                    name_text,
+                    Style::default()
+                        .fg(if is_selected {
+                            theme::ACCENT
+                        } else {
+                            theme::TEXT_PRIMARY
+                        })
+                        .add_modifier(if is_selected {
+                            Modifier::BOLD
+                        } else {
+                            Modifier::empty()
+                        }),
+                ),
+                Span::styled(display_target, Style::default().fg(theme::TEXT_SECONDARY)),
             ];
+
+            // Line 2: Description (left) | empty (right)
+            let line2 = vec![
+                Span::raw("  "),
+                Span::styled(
+                    cmd.description.clone(),
+                    Style::default().fg(theme::TEXT_SECONDARY),
+                ),
+            ];
+
+            let content = vec![Line::from(line1), Line::from(line2), Line::from("")];
 
             ListItem::new(content)
         })
@@ -1305,9 +1965,7 @@ fn render_command_palette(f: &mut Frame, area: ratatui::layout::Rect, app: &App)
     // Separator
     let separator = Paragraph::new(Line::from(vec![Span::styled(
         "─".repeat(inner_area.width as usize),
-        Style::default()
-            .fg(theme::SEPARATOR)
-            .add_modifier(Modifier::DIM),
+        Style::default().fg(theme::SEPARATOR),
     )]));
     f.render_widget(separator, chunks[2]);
 
@@ -1319,13 +1977,13 @@ fn render_command_palette(f: &mut Frame, area: ratatui::layout::Rect, app: &App)
             Line::from(vec![
                 Span::raw("  "),
                 Span::styled(
-                    format!("Working dir: {}", app.command_working_dir),
+                    format!("Working dir: {}", app.get_target_workspace()),
                     Style::default().fg(theme::TEXT_SECONDARY),
                 ),
             ]),
             Line::from(vec![
                 Span::raw("  "),
-                Span::styled("$ ", Style::default().fg(theme::TEXT_TERTIARY)),
+                Span::styled("$ ", Style::default().fg(theme::TEXT_SECONDARY)),
                 Span::styled(
                     &app.input_buffer,
                     Style::default()
@@ -1337,22 +1995,10 @@ fn render_command_palette(f: &mut Frame, area: ratatui::layout::Rect, app: &App)
             Line::from(""),
             Line::from(vec![
                 Span::raw("  "),
-                Span::styled(
-                    "[Enter]",
-                    Style::default().fg(theme::TEXT_DIM).add_modifier(Modifier::DIM),
-                ),
-                Span::styled(
-                    " execute  ",
-                    Style::default().fg(theme::TEXT_DIM).add_modifier(Modifier::DIM),
-                ),
-                Span::styled(
-                    "[Esc]",
-                    Style::default().fg(theme::TEXT_DIM).add_modifier(Modifier::DIM),
-                ),
-                Span::styled(
-                    " cancel",
-                    Style::default().fg(theme::TEXT_DIM).add_modifier(Modifier::DIM),
-                ),
+                Span::styled("[Enter]", Style::default().fg(theme::TEXT_SECONDARY)),
+                Span::styled(" execute  ", Style::default().fg(theme::TEXT_SECONDARY)),
+                Span::styled("[Esc]", Style::default().fg(theme::TEXT_SECONDARY)),
+                Span::styled(" cancel", Style::default().fg(theme::TEXT_SECONDARY)),
             ]),
         ]);
         f.render_widget(edit_ui, chunks[3]);
@@ -1362,15 +2008,22 @@ fn render_command_palette(f: &mut Frame, area: ratatui::layout::Rect, app: &App)
             Line::from(""),
             Line::from(vec![Span::styled(
                 "  Preview",
-                Style::default()
-                    .fg(theme::TEXT_TERTIARY)
-                    .add_modifier(Modifier::DIM),
+                Style::default().fg(theme::TEXT_SECONDARY),
             )]),
             Line::from(""),
             Line::from(vec![
                 Span::raw("  "),
-                Span::styled("$ ", Style::default().fg(theme::TEXT_TERTIARY)),
+                Span::styled("$ ", Style::default().fg(theme::TEXT_SECONDARY)),
                 Span::styled(cmd.command.clone(), Style::default().fg(theme::ACCENT)),
+            ]),
+            Line::from(""),
+            Line::from(vec![
+                Span::raw("  "),
+                Span::styled("[t]", Style::default().fg(theme::TEXT_SECONDARY)),
+                Span::styled(
+                    " change target workspace",
+                    Style::default().fg(theme::TEXT_SECONDARY),
+                ),
             ]),
         ]);
         f.render_widget(preview, chunks[3]);
@@ -1384,80 +2037,60 @@ fn render_detail(f: &mut Frame, area: ratatui::layout::Rect, app: &App) {
     });
 
     if let Some(project) = app.get_selected_project() {
+        // Use 2-column layout: info (left) | metadata (right)
+        let total_width = inner_area.width.saturating_sub(4) as usize;
+        let left_width = (total_width * 70) / 100;
+        let right_width = total_width.saturating_sub(left_width);
+
         let mut lines = vec![
-            Line::from(vec![Span::styled(
-                project.name.clone(),
-                Style::default()
-                    .fg(theme::ACCENT)
-                    .add_modifier(Modifier::BOLD),
-            )]),
+            // Line 1: Name (left) | PATH label + value (right)
+            Line::from(vec![
+                Span::styled(
+                    format!("{:width$}", project.name, width = left_width),
+                    Style::default()
+                        .fg(theme::ACCENT)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(
+                    format!("PATH: {}", project.path),
+                    Style::default().fg(theme::TEXT_SECONDARY),
+                ),
+            ]),
             Line::from(""),
+            // Line 3: Description (left) | empty (right)
             Line::from(vec![Span::styled(
                 project.description.clone(),
                 Style::default().fg(theme::TEXT_SECONDARY),
             )]),
             Line::from(""),
-            Line::from(""),
-            Line::from(vec![Span::styled(
-                "PATH",
-                Style::default()
-                    .fg(theme::TEXT_TERTIARY)
-                    .add_modifier(Modifier::DIM),
-            )]),
-            Line::from(vec![Span::styled(
-                project.path.clone(),
-                Style::default().fg(theme::TEXT_PRIMARY),
-            )]),
-            Line::from(""),
-            Line::from(""),
-            Line::from(vec![Span::styled(
-                "DRIVERS",
-                Style::default()
-                    .fg(theme::TEXT_TERTIARY)
-                    .add_modifier(Modifier::DIM),
-            )]),
-            Line::from(""),
         ];
 
-        // Add driver details with nice formatting
-        for driver in &project.drivers {
-            lines.push(Line::from(vec![
-                Span::raw("  "),
-                Span::styled("●", Style::default().fg(theme::SUCCESS)),
-                Span::raw("  "),
-                Span::styled(driver.clone(), Style::default().fg(theme::TEXT_PRIMARY)),
-                Span::raw("  "),
-                Span::styled(
-                    "active",
-                    Style::default()
-                        .fg(theme::TEXT_TERTIARY)
-                        .add_modifier(Modifier::DIM),
-                ),
-            ]));
+        // Git Status and Build State
+        if let Some(state) = app.get_current_project_state() {
+            lines.extend(render_git_status(&state.git));
+            lines.push(Line::from(""));
+
+            if let Some(build) = &state.build {
+                lines.extend(render_build_state(build));
+                lines.push(Line::from(""));
+            }
         }
 
+        // Recent Logs
+        lines.extend(render_recent_logs(&project.path, app.selected_log));
         lines.push(Line::from(""));
-        lines.push(Line::from(""));
+
         lines.push(Line::from(vec![Span::styled(
             "─".repeat(40),
-            Style::default()
-                .fg(theme::SEPARATOR)
-                .add_modifier(Modifier::DIM),
+            Style::default().fg(theme::SEPARATOR),
         )]));
         lines.push(Line::from(""));
         lines.push(Line::from(vec![
-            Span::styled(
-                "Press ",
-                Style::default()
-                    .fg(theme::TEXT_DIM)
-                    .add_modifier(Modifier::DIM),
-            ),
+            Span::styled("Press ", Style::default().fg(theme::TEXT_SECONDARY)),
             Span::styled("1", Style::default().fg(theme::ACCENT)),
             Span::styled(
                 " to return to projects",
-                Style::default()
-                    .fg(theme::TEXT_DIM)
-                    .add_modifier(Modifier::DIM),
+                Style::default().fg(theme::TEXT_SECONDARY),
             ),
         ]));
 
@@ -1468,13 +2101,237 @@ fn render_detail(f: &mut Frame, area: ratatui::layout::Rect, app: &App) {
             Line::from(""),
             Line::from(vec![Span::styled(
                 "No project selected",
-                Style::default().fg(theme::TEXT_TERTIARY),
+                Style::default().fg(theme::TEXT_SECONDARY),
             )]),
         ])
         .block(Block::default().borders(Borders::NONE))
         .alignment(Alignment::Center);
         f.render_widget(paragraph, inner_area);
     }
+}
+
+/// Render git status information
+fn render_git_status(git: &GitStatus) -> Vec<Line> {
+    let mut lines = vec![];
+
+    if !git.is_repo {
+        lines.push(Line::from(vec![Span::styled(
+            "Not a git repository",
+            Style::default().fg(theme::TEXT_SECONDARY),
+        )]));
+        return lines;
+    }
+
+    // Branch and status line
+    let branch_text = git
+        .branch
+        .as_ref()
+        .map(|b| format!("Branch: {}", b))
+        .unwrap_or_else(|| "Branch: (detached HEAD)".to_string());
+
+    let status_color = if git.is_clean {
+        theme::SUCCESS
+    } else {
+        theme::ERROR
+    };
+
+    let status_text = if git.is_clean {
+        " ✓ Clean"
+    } else {
+        " ● Modified"
+    };
+
+    lines.push(Line::from(vec![
+        Span::styled(branch_text, Style::default().fg(theme::TEXT_PRIMARY)),
+        Span::styled(
+            status_text,
+            Style::default()
+                .fg(status_color)
+                .add_modifier(Modifier::BOLD),
+        ),
+    ]));
+
+    // File counts (if not clean)
+    if !git.is_clean {
+        let mut parts = vec![];
+
+        if git.staged > 0 {
+            parts.push(format!("{} staged", git.staged));
+        }
+        if git.modified > 0 {
+            parts.push(format!("{} modified", git.modified));
+        }
+        if git.untracked > 0 {
+            parts.push(format!("{} untracked", git.untracked));
+        }
+
+        if !parts.is_empty() {
+            lines.push(Line::from(vec![Span::styled(
+                format!("  {}", parts.join(", ")),
+                Style::default().fg(theme::TEXT_SECONDARY),
+            )]));
+        }
+    }
+
+    // Tracking info (ahead/behind)
+    if git.ahead > 0 || git.behind > 0 {
+        let mut tracking = vec![];
+        if git.ahead > 0 {
+            tracking.push(format!("↑{}", git.ahead));
+        }
+        if git.behind > 0 {
+            tracking.push(format!("↓{}", git.behind));
+        }
+
+        lines.push(Line::from(vec![Span::styled(
+            format!("  {}", tracking.join(" ")),
+            Style::default().fg(theme::ACCENT),
+        )]));
+    }
+
+    lines
+}
+
+/// Render build state information
+fn render_build_state(build: &BuildState) -> Vec<Line> {
+    use chrono::{DateTime, Utc};
+
+    let mut lines = vec![];
+
+    // Status line
+    let (status_text, status_color) = match build.status {
+        BuildStatus::Success => ("✓ Success", theme::SUCCESS),
+        BuildStatus::Failed => ("✗ Failed", theme::ERROR),
+        BuildStatus::Running => ("⟳ Running", theme::ACCENT),
+    };
+
+    lines.push(Line::from(vec![
+        Span::styled(
+            format!("Build: {}", build.task),
+            Style::default().fg(theme::TEXT_PRIMARY),
+        ),
+        Span::raw("  "),
+        Span::styled(
+            status_text,
+            Style::default()
+                .fg(status_color)
+                .add_modifier(Modifier::BOLD),
+        ),
+    ]));
+
+    // Timestamp
+    if let Some(dt) = DateTime::<Utc>::from_timestamp(build.timestamp, 0) {
+        let now = Utc::now();
+        let duration = now.signed_duration_since(dt);
+
+        let time_ago = if duration.num_seconds() < 60 {
+            "just now".to_string()
+        } else if duration.num_minutes() < 60 {
+            format!("{} minutes ago", duration.num_minutes())
+        } else if duration.num_hours() < 24 {
+            format!("{} hours ago", duration.num_hours())
+        } else {
+            format!("{} days ago", duration.num_days())
+        };
+
+        lines.push(Line::from(vec![Span::styled(
+            format!("  Last build: {}", time_ago),
+            Style::default().fg(theme::TEXT_SECONDARY),
+        )]));
+    }
+
+    lines
+}
+
+/// Render recent command logs
+fn render_recent_logs(project_path: &str, selected_log: usize) -> Vec<Line> {
+    let mut lines = vec![];
+
+    lines.push(Line::from(vec![Span::styled(
+        "Recent Logs",
+        Style::default().fg(theme::TEXT_PRIMARY).add_modifier(Modifier::BOLD),
+    )]));
+
+    let logs = crate::logger::get_recent_logs(project_path, 5);
+
+    if logs.is_empty() {
+        lines.push(Line::from(vec![Span::styled(
+            "  No logs available",
+            Style::default().fg(theme::TEXT_SECONDARY),
+        )]));
+    } else {
+        use chrono::{DateTime, Utc};
+
+        for (i, log) in logs.iter().enumerate() {
+            let is_selected = i == selected_log;
+            // Format timestamp as relative time
+            let time_str = if let Ok(system_time) = log.timestamp.duration_since(std::time::UNIX_EPOCH) {
+                if let Some(dt) = DateTime::<Utc>::from_timestamp(system_time.as_secs() as i64, 0) {
+                    let now = Utc::now();
+                    let duration = now.signed_duration_since(dt);
+
+                    if duration.num_seconds() < 60 {
+                        "just now".to_string()
+                    } else if duration.num_minutes() < 60 {
+                        format!("{}m ago", duration.num_minutes())
+                    } else if duration.num_hours() < 24 {
+                        format!("{}h ago", duration.num_hours())
+                    } else {
+                        format!("{}d ago", duration.num_days())
+                    }
+                } else {
+                    "unknown".to_string()
+                }
+            } else {
+                "unknown".to_string()
+            };
+
+            // Category badge color
+            let category_color = match log.category.as_str() {
+                "build" => theme::ACCENT,
+                "git" => ratatui::style::Color::Rgb(255, 165, 0), // Orange
+                "lint" => ratatui::style::Color::Rgb(147, 112, 219), // Purple
+                _ => theme::TEXT_SECONDARY,
+            };
+
+            // Selection indicator and styling
+            let (indicator, text_style) = if is_selected {
+                (">", Style::default().add_modifier(Modifier::BOLD))
+            } else {
+                (" ", Style::default())
+            };
+
+            lines.push(Line::from(vec![
+                Span::styled(indicator, Style::default().fg(theme::ACCENT)),
+                Span::raw(" "),
+                Span::styled(
+                    format!("[{}]", log.category),
+                    Style::default().fg(category_color).add_modifier(Modifier::BOLD),
+                ),
+                Span::raw(" "),
+                Span::styled(
+                    log.filename.clone(),
+                    text_style.fg(theme::TEXT_PRIMARY),
+                ),
+                Span::raw("  "),
+                Span::styled(
+                    time_str,
+                    text_style.fg(theme::TEXT_SECONDARY),
+                ),
+            ]));
+        }
+
+        lines.push(Line::from(""));
+        lines.push(Line::from(vec![
+            Span::styled("  Use ", Style::default().fg(theme::TEXT_SECONDARY)),
+            Span::styled("↑↓", Style::default().fg(theme::ACCENT)),
+            Span::styled(" to navigate, press ", Style::default().fg(theme::TEXT_SECONDARY)),
+            Span::styled("l", Style::default().fg(theme::ACCENT)),
+            Span::styled(" to open selected log", Style::default().fg(theme::TEXT_SECONDARY)),
+        ]));
+    }
+
+    lines
 }
 
 fn render_workspace_manager(f: &mut Frame, area: ratatui::layout::Rect, app: &App) {
@@ -1485,11 +2342,12 @@ fn render_workspace_manager(f: &mut Frame, area: ratatui::layout::Rect, app: &Ap
 
     // Split into title and content
     // Give more space for help when showing fuzzy matches
-    let help_height = if matches!(app.input_mode, InputMode::AddingDirectory) && !app.fuzzy_matches.is_empty() {
-        Constraint::Min(12) // Enough room for input + matches + help
-    } else {
-        Constraint::Length(3) // Normal help text
-    };
+    let help_height =
+        if matches!(app.input_mode, InputMode::AddingDirectory) && !app.fuzzy_matches.is_empty() {
+            Constraint::Min(12) // Enough room for input + matches + help
+        } else {
+            Constraint::Length(3) // Normal help text
+        };
 
     let chunks = Layout::default()
         .direction(Direction::Vertical)
@@ -1513,7 +2371,7 @@ fn render_workspace_manager(f: &mut Frame, area: ratatui::layout::Rect, app: &Ap
             Span::raw("  "),
             Span::styled(
                 format!("{}", app.workspace_directories.len()),
-                Style::default().fg(theme::TEXT_TERTIARY),
+                Style::default().fg(theme::TEXT_SECONDARY),
             ),
         ]),
         Line::from(""),
@@ -1576,9 +2434,7 @@ fn render_workspace_manager(f: &mut Frame, area: ratatui::layout::Rect, app: &Ap
                 line1.push(Span::raw("  "));
                 line1.push(Span::styled(
                     "[primary]",
-                    Style::default()
-                        .fg(theme::TEXT_TERTIARY)
-                        .add_modifier(Modifier::DIM),
+                    Style::default().fg(theme::TEXT_SECONDARY),
                 ));
             }
 
@@ -1599,9 +2455,7 @@ fn render_workspace_manager(f: &mut Frame, area: ratatui::layout::Rect, app: &Ap
     // Separator
     let separator = Paragraph::new(Line::from(vec![Span::styled(
         "─".repeat(inner_area.width as usize),
-        Style::default()
-            .fg(theme::SEPARATOR)
-            .add_modifier(Modifier::DIM),
+        Style::default().fg(theme::SEPARATOR),
     )]));
     f.render_widget(separator, chunks[2]);
 
@@ -1609,7 +2463,9 @@ fn render_workspace_manager(f: &mut Frame, area: ratatui::layout::Rect, app: &Ap
     let help = if matches!(app.input_mode, InputMode::AddingDirectory) {
         // Build lines for input field and fuzzy matches
         let label = "Enter directory path: ";
-        let available_width = inner_area.width.saturating_sub((2 + label.len() + 1) as u16) as usize;
+        let available_width = inner_area
+            .width
+            .saturating_sub((2 + label.len() + 1) as u16) as usize;
 
         // Create input line with truncated buffer if needed
         let input_line = if app.input_buffer.len() > available_width {
@@ -1619,7 +2475,9 @@ fn render_workspace_manager(f: &mut Frame, area: ratatui::layout::Rect, app: &Ap
                 Span::styled(label, Style::default().fg(theme::TEXT_SECONDARY)),
                 Span::styled(
                     format!("…{}", &app.input_buffer[start_idx..]),
-                    Style::default().fg(theme::ACCENT).add_modifier(Modifier::BOLD),
+                    Style::default()
+                        .fg(theme::ACCENT)
+                        .add_modifier(Modifier::BOLD),
                 ),
                 Span::styled("_", Style::default().fg(theme::ACCENT)),
             ])
@@ -1629,7 +2487,9 @@ fn render_workspace_manager(f: &mut Frame, area: ratatui::layout::Rect, app: &Ap
                 Span::styled(label, Style::default().fg(theme::TEXT_SECONDARY)),
                 Span::styled(
                     &app.input_buffer,
-                    Style::default().fg(theme::ACCENT).add_modifier(Modifier::BOLD),
+                    Style::default()
+                        .fg(theme::ACCENT)
+                        .add_modifier(Modifier::BOLD),
                 ),
                 Span::styled("_", Style::default().fg(theme::ACCENT)),
             ])
@@ -1644,7 +2504,7 @@ fn render_workspace_manager(f: &mut Frame, area: ratatui::layout::Rect, app: &Ap
                 Span::raw("  "),
                 Span::styled(
                     "───────────────────────────────────────────────",
-                    Style::default().fg(theme::ACCENT).add_modifier(Modifier::DIM),
+                    Style::default().fg(theme::ACCENT),
                 ),
             ]));
 
@@ -1657,7 +2517,8 @@ fn render_workspace_manager(f: &mut Frame, area: ratatui::layout::Rect, app: &Ap
                 0
             } else {
                 // Keep selection near bottom of window
-                (app.fuzzy_selected - visible_count + 1).min(total_matches.saturating_sub(visible_count))
+                (app.fuzzy_selected - visible_count + 1)
+                    .min(total_matches.saturating_sub(visible_count))
             };
             let end_idx = (start_idx + visible_count).min(total_matches);
 
@@ -1731,63 +2592,23 @@ fn render_workspace_manager(f: &mut Frame, area: ratatui::layout::Rect, app: &Ap
                 Span::raw("  "),
                 Span::styled(
                     "───────────────────────────────────────────────",
-                    Style::default().fg(theme::ACCENT).add_modifier(Modifier::DIM),
+                    Style::default().fg(theme::ACCENT),
                 ),
             ]));
         }
 
         // Add keyboard help
         lines.push(Line::from(vec![
-                Span::raw("  "),
-                Span::styled(
-                    "[Tab]",
-                    Style::default()
-                        .fg(theme::TEXT_DIM)
-                        .add_modifier(Modifier::DIM),
-                ),
-                Span::styled(
-                    " complete  ",
-                    Style::default()
-                        .fg(theme::TEXT_DIM)
-                        .add_modifier(Modifier::DIM),
-                ),
-                Span::styled(
-                    "[Ctrl+D]",
-                    Style::default()
-                        .fg(theme::TEXT_DIM)
-                        .add_modifier(Modifier::DIM),
-                ),
-                Span::styled(
-                    " fuzzy find  ",
-                    Style::default()
-                        .fg(theme::TEXT_DIM)
-                        .add_modifier(Modifier::DIM),
-                ),
-                Span::styled(
-                    "[Enter]",
-                    Style::default()
-                        .fg(theme::TEXT_DIM)
-                        .add_modifier(Modifier::DIM),
-                ),
-                Span::styled(
-                    " add  ",
-                    Style::default()
-                        .fg(theme::TEXT_DIM)
-                        .add_modifier(Modifier::DIM),
-                ),
-                Span::styled(
-                    "[Esc]",
-                    Style::default()
-                        .fg(theme::TEXT_DIM)
-                        .add_modifier(Modifier::DIM),
-                ),
-                Span::styled(
-                    " cancel",
-                    Style::default()
-                        .fg(theme::TEXT_DIM)
-                        .add_modifier(Modifier::DIM),
-                ),
-            ]));
+            Span::raw("  "),
+            Span::styled("[Tab]", Style::default().fg(theme::TEXT_SECONDARY)),
+            Span::styled(" complete  ", Style::default().fg(theme::TEXT_SECONDARY)),
+            Span::styled("[Ctrl+D]", Style::default().fg(theme::TEXT_SECONDARY)),
+            Span::styled(" fuzzy find  ", Style::default().fg(theme::TEXT_SECONDARY)),
+            Span::styled("[Enter]", Style::default().fg(theme::TEXT_SECONDARY)),
+            Span::styled(" add  ", Style::default().fg(theme::TEXT_SECONDARY)),
+            Span::styled("[Esc]", Style::default().fg(theme::TEXT_SECONDARY)),
+            Span::styled(" cancel", Style::default().fg(theme::TEXT_SECONDARY)),
+        ]));
 
         Paragraph::new(lines)
     } else {
@@ -1796,56 +2617,165 @@ fn render_workspace_manager(f: &mut Frame, area: ratatui::layout::Rect, app: &Ap
             Line::from(""),
             Line::from(vec![
                 Span::raw("  "),
-                Span::styled(
-                    "a",
-                    Style::default()
-                        .fg(theme::TEXT_DIM)
-                        .add_modifier(Modifier::DIM),
-                ),
-                Span::styled(
-                    " add  ",
-                    Style::default()
-                        .fg(theme::TEXT_DIM)
-                        .add_modifier(Modifier::DIM),
-                ),
-                Span::styled(
-                    "e",
-                    Style::default()
-                        .fg(theme::TEXT_DIM)
-                        .add_modifier(Modifier::DIM),
-                ),
-                Span::styled(
-                    " edit  ",
-                    Style::default()
-                        .fg(theme::TEXT_DIM)
-                        .add_modifier(Modifier::DIM),
-                ),
-                Span::styled(
-                    "d",
-                    Style::default()
-                        .fg(theme::TEXT_DIM)
-                        .add_modifier(Modifier::DIM),
-                ),
-                Span::styled(
-                    " remove  ",
-                    Style::default()
-                        .fg(theme::TEXT_DIM)
-                        .add_modifier(Modifier::DIM),
-                ),
-                Span::styled(
-                    "1",
-                    Style::default()
-                        .fg(theme::TEXT_DIM)
-                        .add_modifier(Modifier::DIM),
-                ),
+                Span::styled("a", Style::default().fg(theme::TEXT_SECONDARY)),
+                Span::styled(" add  ", Style::default().fg(theme::TEXT_SECONDARY)),
+                Span::styled("e", Style::default().fg(theme::TEXT_SECONDARY)),
+                Span::styled(" edit  ", Style::default().fg(theme::TEXT_SECONDARY)),
+                Span::styled("d", Style::default().fg(theme::TEXT_SECONDARY)),
+                Span::styled(" remove  ", Style::default().fg(theme::TEXT_SECONDARY)),
+                Span::styled("1", Style::default().fg(theme::TEXT_SECONDARY)),
                 Span::styled(
                     " back to projects",
-                    Style::default()
-                        .fg(theme::TEXT_DIM)
-                        .add_modifier(Modifier::DIM),
+                    Style::default().fg(theme::TEXT_SECONDARY),
                 ),
             ]),
         ])
     };
     f.render_widget(help, chunks[3]);
+}
+
+/// Render horizontal progress bar on the right side
+fn render_progress_bar(f: &mut Frame, area: ratatui::layout::Rect, app: &App) {
+    // Check if showing result or running animation
+    if let Some((success, _)) = app.command_result_display {
+        render_command_result(f, area, success);
+        return;
+    }
+
+    // Progress bar configuration
+    let bar_width = 32; // Width of the progress bar
+    let bar_height = 4; // Height: border + text line + bar line + border
+
+    // Position aligned with preview section in command palette
+    // Header (3) + Tab bar (1) + Title (2) + Command list (min 8) + Separator (1) = ~15 lines from top
+    let x_pos = area.width.saturating_sub(bar_width + 2);
+    let y_pos = area.height.saturating_sub(12); // Position ~12 lines from bottom (aligns with preview)
+
+    let bar_area = ratatui::layout::Rect {
+        x: x_pos,
+        y: y_pos,
+        width: bar_width,
+        height: bar_height,
+    };
+
+    // Create scanner/spotlight effect - bright segment moving through darker bar
+    let bar_content_width = (bar_width.saturating_sub(4)) as usize; // Account for borders + padding
+    let bright_segment_width = 8; // Fixed bright segment width
+
+    // Calculate position of bright segment (0 to bar_content_width)
+    let total_positions = bar_content_width;
+    let position = (app.build_animation_frame / 2) % total_positions; // Slow down animation
+
+    // Build the bar: dark before position, bright at position, dark after
+    let left_count = position.min(bar_content_width);
+    let bright_start = left_count;
+    let bright_end = (left_count + bright_segment_width).min(bar_content_width);
+    let right_start = bright_end;
+
+    let left_str = "█".repeat(left_count);
+    let bright_str = "█".repeat(bright_end.saturating_sub(bright_start));
+    let right_str = "█".repeat(bar_content_width.saturating_sub(right_start));
+
+    // Get elapsed time
+    let elapsed_text = if let Some(start) = app.build_animation_start {
+        let elapsed = start.elapsed().as_millis();
+        if elapsed >= 1000 {
+            format!("{}s", elapsed / 1000)
+        } else {
+            format!("{}ms", elapsed)
+        }
+    } else {
+        "0ms".to_string()
+    };
+
+    // Create the widget with three-tone bar effect
+    let bar_line = vec![
+        Span::raw(" "),
+        Span::styled(
+            left_str,
+            Style::default().fg(ratatui::style::Color::Rgb(100, 100, 100)),
+        ),
+        Span::styled(
+            bright_str,
+            Style::default()
+                .fg(ratatui::style::Color::Rgb(255, 255, 255))
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(
+            right_str,
+            Style::default().fg(ratatui::style::Color::Rgb(100, 100, 100)),
+        ),
+        Span::raw(" "),
+    ];
+
+    let progress_widget = Paragraph::new(vec![
+        Line::from(vec![
+            Span::styled(" Running ", Style::default().fg(theme::TEXT_SECONDARY)),
+            Span::styled(
+                elapsed_text,
+                Style::default()
+                    .fg(theme::ACCENT)
+                    .add_modifier(Modifier::BOLD),
+            ),
+        ]),
+        Line::from(bar_line),
+    ])
+    .block(
+        Block::default()
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(theme::ACCENT))
+            .border_type(ratatui::widgets::BorderType::Rounded),
+    );
+
+    f.render_widget(progress_widget, bar_area);
+}
+
+/// Render command result (success or failure) in attention-grabbing style
+fn render_command_result(f: &mut Frame, area: ratatui::layout::Rect, success: bool) {
+    let bar_width = 32;
+    let bar_height = 4;
+
+    let x_pos = area.width.saturating_sub(bar_width + 2);
+    let y_pos = area.height.saturating_sub(12);
+
+    let bar_area = ratatui::layout::Rect {
+        x: x_pos,
+        y: y_pos,
+        width: bar_width,
+        height: bar_height,
+    };
+
+    // Choose color and message based on success/failure
+    let (color, icon, message) = if success {
+        (ratatui::style::Color::Green, "✓", "SUCCESS")
+    } else {
+        (ratatui::style::Color::Red, "✗", "FAILED")
+    };
+
+    // Create a solid bar in the result color
+    let bar_content_width = bar_width.saturating_sub(4) as usize;
+    let solid_bar = "█".repeat(bar_content_width);
+
+    let result_widget = Paragraph::new(vec![
+        Line::from(vec![
+            Span::styled(
+                format!(" {} {}", icon, message),
+                Style::default()
+                    .fg(color)
+                    .add_modifier(Modifier::BOLD),
+            ),
+        ]),
+        Line::from(Span::styled(
+            format!(" {}", solid_bar),
+            Style::default().fg(color).add_modifier(Modifier::BOLD),
+        )),
+    ])
+    .block(
+        Block::default()
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(color).add_modifier(Modifier::BOLD))
+            .border_type(ratatui::widgets::BorderType::Rounded),
+    );
+
+    f.render_widget(result_widget, bar_area);
 }

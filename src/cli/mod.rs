@@ -39,7 +39,10 @@ pub fn run() -> Result<()> {
         }) => {
             let workspace_path = &config.global.workspace.path;
 
-            println!("Creating {} {} project '{}'...", ecosystem, project_type, name);
+            println!(
+                "Creating {} {} project '{}'...",
+                ecosystem, project_type, name
+            );
 
             match crate::projects::init_project(workspace_path, &ecosystem, &project_type, &name) {
                 Ok(path) => {

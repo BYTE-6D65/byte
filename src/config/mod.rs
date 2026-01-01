@@ -70,34 +70,49 @@ impl Config {
 
     /// Add a workspace path to the registered list
     pub fn add_workspace_path(&mut self, path: &str) -> Result<()> {
-        // Expand tilde
+        // Expand tilde and normalize (remove trailing slashes)
         let expanded = shellexpand::tilde(path).to_string();
+        let normalized = expanded.trim_end_matches('/').to_string();
 
         // Validate path exists
-        let path_buf = PathBuf::from(&expanded);
+        let path_buf = PathBuf::from(&normalized);
         if !path_buf.exists() {
-            anyhow::bail!("Path does not exist: {}", expanded);
+            anyhow::bail!("Path does not exist: {}", normalized);
         }
 
         if !path_buf.is_dir() {
-            anyhow::bail!("Path is not a directory: {}", expanded);
+            anyhow::bail!("Path is not a directory: {}", normalized);
         }
 
-        // Check if already registered (compare expanded paths)
+        // Use canonical path for comparison (handles case-insensitivity and symlinks)
+        let canonical = path_buf
+            .canonicalize()
+            .map_err(|e| anyhow::anyhow!("Failed to canonicalize path: {}", e))?;
+
+        // Check if already registered (compare canonical paths)
         let primary_expanded = shellexpand::tilde(&self.global.workspace.path).to_string();
-        if expanded == primary_expanded {
-            anyhow::bail!("Path is already the primary workspace");
+        let primary_path = PathBuf::from(primary_expanded.trim_end_matches('/'));
+        if let Ok(primary_canonical) = primary_path.canonicalize() {
+            if canonical == primary_canonical {
+                anyhow::bail!("Path is already the primary workspace");
+            }
         }
 
         for registered in &self.global.workspace.registered {
             let registered_expanded = shellexpand::tilde(registered).to_string();
-            if expanded == registered_expanded {
-                anyhow::bail!("Path is already registered");
+            let registered_path = PathBuf::from(registered_expanded.trim_end_matches('/'));
+            if let Ok(registered_canonical) = registered_path.canonicalize() {
+                if canonical == registered_canonical {
+                    anyhow::bail!("Path is already registered");
+                }
             }
         }
 
-        // Add to registered list (store with tilde for portability)
-        self.global.workspace.registered.push(path.to_string());
+        // Normalize the original path (remove trailing slash but keep tilde)
+        let normalized_input = path.trim_end_matches('/').to_string();
+
+        // Add to registered list (store normalized with tilde for portability)
+        self.global.workspace.registered.push(normalized_input);
 
         // Save to file
         self.save()?;

@@ -22,3 +22,6 @@ shellexpand = "3"
 atty = "0.2"
 dirs = "5.0"
 skim = "0.15"
+notify = { version = "6.1", features = ["serde"] }
+notify-debouncer-full = "0.3"
+chrono = "0.4"

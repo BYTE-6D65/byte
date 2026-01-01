@@ -39,6 +39,10 @@ pub struct ExplainConfig {
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct ProjectConfig {
     pub project: ProjectMeta,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub build: Option<std::collections::HashMap<String, String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub commands: Option<std::collections::HashMap<String, String>>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -83,6 +87,8 @@ impl Default for ProjectConfig {
     fn default() -> Self {
         Self {
             project: ProjectMeta::default(),
+            build: None,
+            commands: None,
         }
     }
 }

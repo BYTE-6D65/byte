@@ -19,9 +19,15 @@ pub fn discover_projects(global_config: &GlobalConfig) -> Result<Vec<DiscoveredP
     // Scan workspace if auto_scan is enabled
     if global_config.workspace.auto_scan {
         let workspace_path = shellexpand::tilde(&global_config.workspace.path).to_string();
-        crate::logger::info(&format!("[DISCOVERY] Scanning primary workspace: {}", workspace_path));
+        crate::logger::info(&format!(
+            "[DISCOVERY] Scanning primary workspace: {}",
+            workspace_path
+        ));
         if let Ok(workspace_projects) = scan_directory(&workspace_path) {
-            crate::logger::info(&format!("[DISCOVERY] Found {} projects in primary workspace", workspace_projects.len()));
+            crate::logger::info(&format!(
+                "[DISCOVERY] Found {} projects in primary workspace",
+                workspace_projects.len()
+            ));
             projects.extend(workspace_projects);
         } else {
             crate::logger::info("[DISCOVERY] Failed to scan primary workspace");
@@ -31,22 +37,39 @@ pub fn discover_projects(global_config: &GlobalConfig) -> Result<Vec<DiscoveredP
     // Scan manually registered directories for projects
     for registered_path in &global_config.workspace.registered {
         let expanded_path = shellexpand::tilde(registered_path).to_string();
-        crate::logger::info(&format!("[DISCOVERY] Scanning registered path: {}", expanded_path));
+        crate::logger::info(&format!(
+            "[DISCOVERY] Scanning registered path: {}",
+            expanded_path
+        ));
         match scan_directory(&expanded_path) {
             Ok(registered_projects) => {
-                crate::logger::info(&format!("[DISCOVERY] Found {} projects in {}", registered_projects.len(), expanded_path));
+                crate::logger::info(&format!(
+                    "[DISCOVERY] Found {} projects in {}",
+                    registered_projects.len(),
+                    expanded_path
+                ));
                 for proj in &registered_projects {
-                    crate::logger::info(&format!("[DISCOVERY]   - {} at {}", proj.config.project.name, proj.path.display()));
+                    crate::logger::info(&format!(
+                        "[DISCOVERY]   - {} at {}",
+                        proj.config.project.name,
+                        proj.path.display()
+                    ));
                 }
                 projects.extend(registered_projects);
             }
             Err(e) => {
-                crate::logger::info(&format!("[DISCOVERY] Failed to scan {}: {}", expanded_path, e));
+                crate::logger::info(&format!(
+                    "[DISCOVERY] Failed to scan {}: {}",
+                    expanded_path, e
+                ));
             }
         }
     }
 
-    crate::logger::info(&format!("[DISCOVERY] Total projects discovered: {}", projects.len()));
+    crate::logger::info(&format!(
+        "[DISCOVERY] Total projects discovered: {}",
+        projects.len()
+    ));
     Ok(projects)
 }
 
@@ -73,15 +96,25 @@ fn scan_directory(path: &str) -> Result<Vec<DiscoveredProject>> {
                 entry_count += 1;
                 let file_name = entry.file_name().to_string_lossy();
                 if file_name == "byte.toml" {
-                    crate::logger::info(&format!("[SCAN] Found byte.toml at: {}", entry.path().display()));
+                    crate::logger::info(&format!(
+                        "[SCAN] Found byte.toml at: {}",
+                        entry.path().display()
+                    ));
                     if let Some(project_dir) = entry.path().parent() {
                         match load_project(project_dir.to_str().unwrap_or("")) {
                             Ok(project) => {
-                                crate::logger::info(&format!("[SCAN] Successfully loaded project: {}", project.config.project.name));
+                                crate::logger::info(&format!(
+                                    "[SCAN] Successfully loaded project: {}",
+                                    project.config.project.name
+                                ));
                                 projects.push(project);
                             }
                             Err(e) => {
-                                crate::logger::info(&format!("[SCAN] Failed to load project from {}: {}", project_dir.display(), e));
+                                crate::logger::info(&format!(
+                                    "[SCAN] Failed to load project from {}: {}",
+                                    project_dir.display(),
+                                    e
+                                ));
                             }
                         }
                     }
@@ -93,7 +126,11 @@ fn scan_directory(path: &str) -> Result<Vec<DiscoveredProject>> {
         }
     }
 
-    crate::logger::info(&format!("[SCAN] Scanned {} entries, found {} projects", entry_count, projects.len()));
+    crate::logger::info(&format!(
+        "[SCAN] Scanned {} entries, found {} projects",
+        entry_count,
+        projects.len()
+    ));
 
     Ok(projects)
 }
@@ -131,7 +168,10 @@ pub fn init_project(
     // Create project directory
     let project_path = workspace_path.join(name);
     if project_path.exists() {
-        anyhow::bail!("Project directory already exists: {}", project_path.display());
+        anyhow::bail!(
+            "Project directory already exists: {}",
+            project_path.display()
+        );
     }
 
     fs::create_dir_all(&project_path)?;
@@ -152,6 +192,8 @@ pub fn init_project(
             ecosystem: ecosystem.to_string(),
             description: None,
         },
+        build: None,
+        commands: None,
     };
 
     let config_toml = toml::to_string_pretty(&config)?;
@@ -169,6 +211,9 @@ pub fn init_project(
 
     // Add .byte/ to .gitignore
     add_to_gitignore(&project_path)?;
+
+    // Initialize git repository
+    init_git_repo(&project_path, name)?;
 
     Ok(project_path)
 }
@@ -204,7 +249,7 @@ fn init_go_project(project_path: &Path, name: &str) -> Result<()> {
     Command::new("go")
         .args(&["mod", "init", name])
         .current_dir(project_path)
-        .status()?;
+        .output()?;
 
     // Create main.go
     let main_go = format!(
@@ -234,7 +279,7 @@ fn init_bun_project(project_path: &Path, name: &str) -> Result<()> {
     Command::new("bun")
         .args(&["init", "-y"])
         .current_dir(project_path)
-        .status()?;
+        .output()?;
 
     // Create index.ts
     let index_ts = format!(
@@ -255,7 +300,33 @@ fn init_rust_project(project_path: &Path, name: &str) -> Result<()> {
     Command::new("cargo")
         .args(&["init", "--name", name])
         .current_dir(project_path)
-        .status()?;
+        .output()?;
+
+    Ok(())
+}
+
+/// Initialize git repository with initial commit
+fn init_git_repo(project_path: &Path, name: &str) -> Result<()> {
+    use std::process::Command;
+
+    // Initialize git repository
+    Command::new("git")
+        .arg("init")
+        .current_dir(project_path)
+        .output()?;
+
+    // Stage all files
+    Command::new("git")
+        .args(&["add", "."])
+        .current_dir(project_path)
+        .output()?;
+
+    // Create initial commit
+    let commit_message = format!("Initial commit: {} project", name);
+    Command::new("git")
+        .args(&["commit", "-m", &commit_message])
+        .current_dir(project_path)
+        .output()?;
 
     Ok(())
 }

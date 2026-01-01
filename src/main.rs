@@ -2,6 +2,7 @@ mod cli;
 mod config;
 mod logger;
 mod projects;
+mod state;
 mod tui;
 
 fn main() {
