@@ -3,6 +3,8 @@ pub mod config;
 pub mod exec;
 pub mod forms;
 pub mod fs;
+pub mod log;
+pub mod path;
 pub mod projects;
 pub mod state;
 pub mod tui;

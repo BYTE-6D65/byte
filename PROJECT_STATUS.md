@@ -1,7 +1,7 @@
 # Byte - Project Status
 
 **Date:** 2026-01-01
-**Version:** 0.2.0
+**Version:** 0.4.0
 **Status:** Development - Phase 1 Complete
 
 ## Executive Summary

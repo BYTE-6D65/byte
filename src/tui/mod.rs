@@ -184,6 +184,8 @@ pub struct CommandResult {
     pub working_dir: String,
     pub is_build_cmd: bool,
     pub task_name: Option<String>,
+    pub stdout: String,
+    pub stderr: String,
 }
 
 impl Default for App {
@@ -296,18 +298,9 @@ impl App {
                 for workspace in &mut app.workspace_directories {
                     let expanded_path = shellexpand::tilde(&workspace.path).to_string();
                     let normalized_workspace = expanded_path.trim_end_matches('/').to_lowercase();
-                    eprintln!("[INFO] {}", format!(
-                        "[COUNT] Counting projects for workspace: {}",
-                        expanded_path
-                    ));
-                    for proj in &app.projects {
-                        let normalized_proj = proj.path.trim_end_matches('/').to_lowercase();
-                        let matches = normalized_proj.starts_with(&normalized_workspace);
-                        eprintln!("[INFO] {}", format!(
-                            "[COUNT]   Checking project: {} (starts_with? {})",
-                            proj.path, matches
-                        ));
-                    }
+
+                    crate::log::info("COUNT", &format!("Counting projects for workspace: {}", expanded_path));
+
                     workspace.project_count = app
                         .projects
                         .iter()
@@ -316,10 +309,8 @@ impl App {
                             normalized_proj.starts_with(&normalized_workspace)
                         })
                         .count();
-                    eprintln!("[INFO] {}", format!(
-                        "[COUNT] Final count for {}: {}",
-                        expanded_path, workspace.project_count
-                    ));
+
+                    crate::log::info("COUNT", &format!("Final count for {}: {}", expanded_path, workspace.project_count));
                 }
 
                 if !app.projects.is_empty() {
@@ -451,11 +442,17 @@ impl App {
 
         if result.success {
             self.status_message = format!("✓ {}", result.command);
-            eprintln!("[INFO] {}", format!("[EXEC] Success: {}", result.command));
+            crate::log::info("EXEC", &format!("Success: {}", result.command));
             self.hotload();
         } else {
             self.status_message = format!("✗ Command failed");
-            eprintln!("[INFO] {}", format!("[EXEC] Failed: {}", result.command));
+            crate::log::error("EXEC", &format!("Failed: {}", result.command));
+            if !result.stderr.is_empty() {
+                crate::log::error("EXEC", &format!("  stderr: {}", result.stderr.trim()));
+            }
+            if !result.stdout.is_empty() {
+                crate::log::error("EXEC", &format!("  stdout: {}", result.stdout.trim()));
+            }
         }
     }
 
@@ -469,10 +466,7 @@ impl App {
             shellexpand::tilde(&self.get_target_workspace()).to_string()
         };
 
-        eprintln!("[INFO] {}", format!(
-            "[EXEC] Executing: {} in {}",
-            command_str, working_dir
-        ));
+        crate::log::info("EXEC", &format!("Executing: {} in {}", command_str, working_dir));
 
         // Check if this is a build command
         let is_build_cmd = self.is_build_command(command_str);
@@ -519,7 +513,12 @@ impl App {
                         "my-project"
                     };
 
-                    match crate::projects::init_project(
+                    // Validate project name before attempting to create
+                    if let Err(e) = crate::projects::validate_project_name(name) {
+                        let msg = format!("Invalid project name: {}", e);
+                        (false, String::new(), msg)
+                    } else {
+                        match crate::projects::init_project(
                         &working_dir_clone,
                         ecosystem,
                         project_type,
@@ -527,14 +526,13 @@ impl App {
                     ) {
                         Ok(project_path) => {
                             let msg = format!("Created project at {}", project_path.display());
-                            eprintln!("[INFO] {}", format!("[EXEC] Success: {}", msg));
                             (true, msg, String::new())
                         }
                         Err(e) => {
                             let msg = format!("Failed to create project: {}", e);
-                            eprintln!("[INFO] {}", format!("[EXEC] Failed: {}", msg));
                             (false, String::new(), msg)
                         }
+                    }
                     }
                 } else {
                     // Execute regular shell command using exec API (with validation)
@@ -564,7 +562,6 @@ impl App {
                         }
                         Err(e) => {
                             let msg = format!("Command execution failed: {}", e);
-                            eprintln!("[INFO] {}", format!("[EXEC] Error: {}", msg));
                             (false, String::new(), msg)
                         }
                     }
@@ -577,6 +574,8 @@ impl App {
                     working_dir: working_dir_clone,
                     is_build_cmd,
                     task_name,
+                    stdout: _stdout,
+                    stderr: _stderr,
                 });
             });
         }
@@ -1293,7 +1292,7 @@ impl App {
     /// Hot reload all state from disk
     /// Called on file changes (via watcher) or manual refresh (r key)
     pub fn hotload(&mut self) {
-        eprintln!("[INFO] [HOTLOAD] Reloading all state from disk");
+        crate::log::info("HOTLOAD", "Reloading all state from disk");
 
         // Reload config and rediscover projects
         if let Ok(config) = crate::config::Config::load() {
@@ -1372,39 +1371,43 @@ impl App {
         // Refresh project states (git status, build state)
         self.refresh_project_states();
 
-        eprintln!("[INFO] [HOTLOAD] Reload complete");
+        crate::log::info("HOTLOAD", "Reload complete");
     }
 
-    /// Categorize a command based on its command string
+    /// Categorize a command intelligently using keyword matching
     fn categorize_command(command: &str) -> CommandFilter {
-        let cmd_lower = command.to_lowercase();
+        let mut cmd_lower = command.to_lowercase();
 
-        if cmd_lower.contains("cargo build")
-            || cmd_lower.contains("cargo run")
-            || cmd_lower.contains("cargo check")
-            || cmd_lower.contains("go build")
-            || cmd_lower.contains("bun build")
-            || cmd_lower.contains("npm run build")
-            || cmd_lower.contains("make")
-        {
-            CommandFilter::Build
-        } else if cmd_lower.contains("cargo test")
-            || cmd_lower.contains("go test")
-            || cmd_lower.contains("npm test")
-            || cmd_lower.contains("bun test")
-            || cmd_lower.contains("pytest")
-        {
+        // Strip common prefixes to get to the actual command
+        // Handle: "cd dir &&", "cd dir/nested &&"
+        if let Some(idx) = cmd_lower.find(" && ") {
+            if cmd_lower.trim_start().starts_with("cd ") {
+                cmd_lower = cmd_lower[idx + 4..].to_string();
+            }
+        }
+
+        // Git commands are special - must start with "git "
+        if cmd_lower.trim_start().starts_with("git ") {
+            return CommandFilter::Git;
+        }
+
+        // Keyword-based categorization (language-agnostic)
+        // Build: compilation, bundling, development servers
+        const BUILD_KEYWORDS: &[&str] = &["build", "compile", "bundle", "dev", "run", "start", "watch", "serve"];
+
+        // Test: testing, coverage, specs
+        const TEST_KEYWORDS: &[&str] = &["test", "spec", "coverage", "bench"];
+
+        // Lint: formatting, linting, type checking
+        const LINT_KEYWORDS: &[&str] = &["lint", "fmt", "format", "clippy", "check", "prettier", "eslint"];
+
+        // Check for test first (more specific than build)
+        if TEST_KEYWORDS.iter().any(|kw| cmd_lower.contains(kw)) {
             CommandFilter::Test
-        } else if cmd_lower.contains("cargo clippy")
-            || cmd_lower.contains("cargo fmt")
-            || cmd_lower.contains("eslint")
-            || cmd_lower.contains("prettier")
-            || cmd_lower.contains("gofmt")
-            || cmd_lower.contains("rustfmt")
-        {
+        } else if LINT_KEYWORDS.iter().any(|kw| cmd_lower.contains(kw)) {
             CommandFilter::Lint
-        } else if cmd_lower.starts_with("git ") {
-            CommandFilter::Git
+        } else if BUILD_KEYWORDS.iter().any(|kw| cmd_lower.contains(kw)) {
+            CommandFilter::Build
         } else {
             CommandFilter::Other
         }
@@ -1572,10 +1575,7 @@ fn setup_file_watcher(
                                 || path.to_string_lossy().contains(".git/index");
 
                             if should_reload {
-                                eprintln!("[INFO] {}", format!(
-                                    "[WATCHER] Detected change: {:?}",
-                                    path
-                                ));
+                                crate::log::info("WATCHER", &format!("Detected change: {:?}", path));
                                 // Notify main loop to reload
                                 let _ = tx.send(());
                                 break;
@@ -1583,10 +1583,8 @@ fn setup_file_watcher(
                         }
                     }
                 }
-                Err(errors) => {
-                    for error in errors {
-                        eprintln!("[INFO] {}", format!("[WATCHER] Error: {:?}", error));
-                    }
+                Err(_errors) => {
+                    // Silently ignore watcher errors
                 }
             }
         },
@@ -1595,13 +1593,12 @@ fn setup_file_watcher(
     // Watch all workspace directories
     for workspace in &app.workspace_directories {
         let expanded = shellexpand::tilde(&workspace.path).to_string();
-        if let Err(e) = debouncer
+        match debouncer
             .watcher()
             .watch(std::path::Path::new(&expanded), RecursiveMode::Recursive)
         {
-            eprintln!("[INFO] {}", format!("[WATCHER] Failed to watch {}: {}", expanded, e));
-        } else {
-            eprintln!("[INFO] {}", format!("[WATCHER] Watching: {}", expanded));
+            Ok(_) => crate::log::info("WATCHER", &format!("Watching: {}", expanded)),
+            Err(e) => crate::log::error("WATCHER", &format!("Failed to watch {}: {}", expanded, e)),
         }
     }
 
@@ -1609,13 +1606,12 @@ fn setup_file_watcher(
     if let Some(config_dir) = dirs::config_dir() {
         let byte_config = config_dir.join("byte");
         if byte_config.exists() {
-            if let Err(e) = debouncer
+            match debouncer
                 .watcher()
                 .watch(&byte_config, RecursiveMode::NonRecursive)
             {
-                eprintln!("[INFO] {}", format!("[WATCHER] Failed to watch config: {}", e));
-            } else {
-                eprintln!("[INFO] {}", format!("[WATCHER] Watching config: {:?}", byte_config));
+                Ok(_) => crate::log::info("WATCHER", &format!("Watching config: {:?}", byte_config)),
+                Err(e) => crate::log::error("WATCHER", &format!("Failed to watch config: {}", e)),
             }
         }
     }
@@ -1771,6 +1767,9 @@ fn run_app(
     file_rx: std::sync::mpsc::Receiver<()>,
     cmd_rx: std::sync::mpsc::Receiver<CommandResult>,
 ) -> anyhow::Result<()> {
+    // Clear any initialization logs before first draw
+    terminal.clear()?;
+
     while !app.should_quit {
         // Clear terminal if needed (e.g., after closing log preview)
         if app.needs_clear {

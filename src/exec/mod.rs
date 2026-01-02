@@ -179,19 +179,13 @@ impl CommandBuilder {
     }
 
     /// Validate shell command for injection attacks
-    fn validate_shell_command(&self, cmd: &str) -> Result<()> {
-        // Check for dangerous shell metacharacters
-        const DANGEROUS_CHARS: &[char] = &[';', '|', '&', '>', '<', '`', '$', '(', ')'];
-
-        for ch in DANGEROUS_CHARS {
-            if cmd.contains(*ch) {
-                bail!(
-                    "Shell command contains dangerous metacharacter '{}'. Use direct binary execution instead.",
-                    ch
-                );
-            }
-        }
-
+    fn validate_shell_command(&self, _cmd: &str) -> Result<()> {
+        // Shell commands in byte.toml are trusted developer config
+        // Allow full shell features: pipes, logical operators, redirection, etc.
+        // Security is maintained by:
+        // 1. Commands come from trusted byte.toml config files
+        // 2. Command whitelist still enforced for direct binary execution
+        // 3. No runtime user input is interpolated into commands
         Ok(())
     }
 
@@ -354,14 +348,14 @@ mod tests {
     }
 
     #[test]
-    fn test_shell_validation_blocks_injection() {
-        let cmd = CommandBuilder::shell("cargo build; rm -rf /");
-        assert!(cmd.validate().is_err());
+    fn test_shell_validation_allows_chaining() {
+        let cmd = CommandBuilder::shell("cargo build && cargo test");
+        assert!(cmd.validate().is_ok());
     }
 
     #[test]
-    fn test_shell_validation_allows_safe_commands() {
-        let cmd = CommandBuilder::shell("cargo build");
+    fn test_shell_validation_allows_pipes() {
+        let cmd = CommandBuilder::shell("cargo build | grep error");
         assert!(cmd.validate().is_ok());
     }
 
