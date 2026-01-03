@@ -1723,6 +1723,32 @@ fn truncate_path(path: &str, max_width: usize) -> String {
     format!("{}...{}", start, end)
 }
 
+/// Strip ANSI escape codes from a string
+fn strip_ansi_codes(input: &str) -> String {
+    let mut result = String::with_capacity(input.len());
+    let mut chars = input.chars().peekable();
+
+    while let Some(ch) = chars.next() {
+        if ch == '\x1b' {
+            // Skip ESC sequence
+            if chars.peek() == Some(&'[') {
+                chars.next(); // Skip '['
+                // Skip until we hit a letter (CSI terminator)
+                while let Some(&next_ch) = chars.peek() {
+                    chars.next();
+                    if next_ch.is_ascii_alphabetic() {
+                        break;
+                    }
+                }
+            }
+        } else {
+            result.push(ch);
+        }
+    }
+
+    result
+}
+
 /// Launch fuzzy finder for directory selection
 fn run_fuzzy_picker(current_input: &str) -> Option<String> {
     use skim::prelude::*;
@@ -2851,17 +2877,24 @@ fn render_log_preview(f: &mut Frame, area: ratatui::layout::Rect, log_path: &Pat
         ),
     ]));
 
-    // Add visible lines with word wrapping (no truncation)
+    // Add visible lines with truncation (prevents text bleed from long lines)
+    let content_width = available_width; // Full width for log content
     for line in content.iter().skip(start_line).take(end_line - start_line) {
-        display_lines.push(Line::from(line.clone()));
+        // Strip ANSI codes and truncate to fit width
+        let stripped = strip_ansi_codes(line);
+        let truncated = if stripped.len() > content_width {
+            format!("{}…", &stripped[..content_width.saturating_sub(1)])
+        } else {
+            stripped
+        };
+        display_lines.push(Line::from(truncated));
     }
 
     let paragraph = Paragraph::new(display_lines)
         .block(Block::default()
             .borders(Borders::ALL)
             .border_type(ratatui::widgets::BorderType::Rounded)
-            .border_style(Style::default().fg(theme::ACCENT)))
-        .wrap(ratatui::widgets::Wrap { trim: false }); // Enable word wrapping
+            .border_style(Style::default().fg(theme::ACCENT)));
 
     f.render_widget(paragraph, area);
 }
