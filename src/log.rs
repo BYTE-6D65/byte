@@ -7,12 +7,12 @@ use std::path::PathBuf;
 use std::sync::Mutex;
 
 /// Log levels
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Level {
-    Info,
-    Warn,
-    Error,
-    Debug,
+    Debug = 0,
+    Info = 1,
+    Warn = 2,
+    Error = 3,
 }
 
 impl Level {
@@ -32,11 +32,13 @@ static LOGGER: Mutex<Option<Logger>> = Mutex::new(None);
 /// Logger that writes to byte.log
 pub struct Logger {
     log_path: PathBuf,
+    min_level: Level,
 }
 
 impl Logger {
     /// Initialize the global logger
     /// Tries project-local .byte/logs/byte.log first, falls back to ~/.byte/logs/byte.log
+    /// Default log level: INFO (hides DEBUG messages)
     pub fn init() {
         let log_path = Self::determine_log_path();
 
@@ -45,7 +47,10 @@ impl Logger {
             let _ = fs::create_dir_all(parent);
         }
 
-        let logger = Logger { log_path };
+        let logger = Logger {
+            log_path,
+            min_level: Level::Info, // Default: skip DEBUG messages
+        };
 
         // Store in global
         if let Ok(mut global_logger) = LOGGER.lock() {
@@ -74,8 +79,13 @@ impl Logger {
         PathBuf::from("/tmp/byte.log")
     }
 
-    /// Write a log entry
+    /// Write a log entry (filtered by min_level)
     fn write(&self, level: Level, category: &str, message: &str) {
+        // Skip if below minimum level
+        if level < self.min_level {
+            return;
+        }
+
         let timestamp = Local::now().format("%Y-%m-%d %H:%M:%S");
         let log_line = format!(
             "[{}] {} [{}] {}\n",

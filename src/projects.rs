@@ -94,11 +94,11 @@ pub fn discover_projects(global_config: &GlobalConfig) -> Result<Vec<DiscoveredP
     if global_config.workspace.auto_scan {
         match crate::path::SafePath::from_user_input(&global_config.workspace.path) {
             Ok(workspace_path) => {
-                crate::log::info("DISCOVERY", &format!("Scanning primary workspace: {}", workspace_path));
+                crate::log::debug("DISCOVERY", &format!("Scanning primary workspace: {}", workspace_path));
 
                 match scan_directory(workspace_path.expanded()) {
                     Ok(workspace_projects) => {
-                        crate::log::info("DISCOVERY", &format!("Found {} projects in primary workspace", workspace_projects.len()));
+                        crate::log::debug("DISCOVERY", &format!("Found {} projects in primary workspace", workspace_projects.len()));
                         projects.extend(workspace_projects);
                     }
                     Err(e) => {
@@ -116,13 +116,13 @@ pub fn discover_projects(global_config: &GlobalConfig) -> Result<Vec<DiscoveredP
     for registered_path in &global_config.workspace.registered {
         match crate::path::SafePath::from_user_input(registered_path) {
             Ok(safe_path) => {
-                crate::log::info("DISCOVERY", &format!("Scanning registered path: {}", safe_path));
+                crate::log::debug("DISCOVERY", &format!("Scanning registered path: {}", safe_path));
 
                 match scan_directory(safe_path.expanded()) {
                     Ok(registered_projects) => {
-                        crate::log::info("DISCOVERY", &format!("Found {} projects in {}", registered_projects.len(), safe_path));
+                        crate::log::debug("DISCOVERY", &format!("Found {} projects in {}", registered_projects.len(), safe_path));
                         for proj in &registered_projects {
-                            crate::log::info("DISCOVERY", &format!("  - {} at {}", proj.config.project.name, proj.path.display()));
+                            crate::log::debug("DISCOVERY", &format!("  - {} at {}", proj.config.project.name, proj.path.display()));
                         }
                         projects.extend(registered_projects);
                     }
@@ -137,7 +137,7 @@ pub fn discover_projects(global_config: &GlobalConfig) -> Result<Vec<DiscoveredP
         }
     }
 
-    crate::log::info("DISCOVERY", &format!("Total projects discovered: {}", projects.len()));
+                crate::log::debug("DISCOVERY", &format!("Total projects discovered: {}", projects.len()));
     Ok(projects)
 }
 
@@ -145,10 +145,10 @@ pub fn discover_projects(global_config: &GlobalConfig) -> Result<Vec<DiscoveredP
 fn scan_directory(path: &Path) -> Result<Vec<DiscoveredProject>> {
     let mut projects = Vec::new();
 
-    crate::log::info("SCAN", &format!("Scanning directory: {}", path.display()));
+    crate::log::debug("SCAN", &format!("Scanning directory: {}", path.display()));
 
     if !path.exists() {
-        crate::log::info("SCAN", &format!("Path does not exist: {}", path.display()));
+        crate::log::debug("SCAN", &format!("Path does not exist: {}", path.display()));
         return Ok(projects);
     }
 
@@ -163,12 +163,12 @@ fn scan_directory(path: &Path) -> Result<Vec<DiscoveredProject>> {
                 entry_count += 1;
                 let file_name = entry.file_name().to_string_lossy();
                 if file_name == "byte.toml" {
-                    crate::log::info("SCAN", &format!("Found byte.toml at: {}", entry.path().display()));
+                    crate::log::debug("SCAN", &format!("Found byte.toml at: {}", entry.path().display()));
 
                     if let Some(project_dir) = entry.path().parent() {
                         match load_project(project_dir.to_str().unwrap_or("")) {
                             Ok(project) => {
-                                crate::log::info("SCAN", &format!("Successfully loaded project: {}", project.config.project.name));
+                                crate::log::debug("SCAN", &format!("Successfully loaded project: {}", project.config.project.name));
                                 projects.push(project);
                             }
                             Err(e) => {
@@ -184,7 +184,7 @@ fn scan_directory(path: &Path) -> Result<Vec<DiscoveredProject>> {
         }
     }
 
-    crate::log::info("SCAN", &format!("Scanned {} entries, found {} projects", entry_count, projects.len()));
+    crate::log::debug("SCAN", &format!("Scanned {} entries, found {} projects", entry_count, projects.len()));
 
     Ok(projects)
 }

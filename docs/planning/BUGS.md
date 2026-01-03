@@ -21,9 +21,7 @@ _(No active medium-priority bugs)_
 
 ## Low Priority
 
-### Debug Logging Enabled
-- Verbose [DISCOVERY], [SCAN] logs still active
-- Should be configurable or disabled by default
+_(No active low-priority bugs)_
 
 ---
 
@@ -61,6 +59,13 @@ See [ROADMAP.md](./ROADMAP.md) for planned features including:
 - ✅ No "DRIVERS:" label found in detail view
 - Ecosystem tags shown in project browser as "#rust", "#node", etc.
 - Field name still "drivers" in Project struct but displays correctly
+
+### Debug Logging Enabled (Fixed 2026-01-03)
+- ✅ Added log level filtering to Logger (src/log.rs)
+- ✅ Default log level set to INFO (skips DEBUG messages)
+- ✅ Changed all [DISCOVERY] and [SCAN] logs from INFO to DEBUG
+- Verbose discovery/scan logs no longer clutter log files by default
+- Can be enabled in future by adding config option for log level
 
 ---
 
