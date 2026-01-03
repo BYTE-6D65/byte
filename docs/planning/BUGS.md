@@ -15,15 +15,7 @@
 
 ## Medium Priority
 
-### Project List Missing Location
-- Projects from different workspaces look identical
-- Can't tell which workspace a project is from
-- **Solution**: Show subdued path or workspace badge
-
-### Drivers Section Still Showing
-- Detail view shows "DRIVERS: rust active"
-- Drivers concept was removed
-- Should show ecosystem instead or remove
+_(No active medium-priority bugs)_
 
 ---
 
@@ -59,6 +51,16 @@ See [ROADMAP.md](./ROADMAP.md) for planned features including:
 - ✅ `command_result_display` now cleared when switching views (menus 1-4)
 - Command success/failure progress bar dismisses immediately on tab switch
 - Previously persisted until 3-second auto-dismiss timeout
+
+### Project List Missing Location (Already Fixed)
+- ✅ Workspace paths displayed in project browser (line 2162: `get_workspace_for_project()`)
+- Projects show workspace location in right column (60/40 layout)
+- Path truncates with "…" prefix if too long
+
+### Drivers Section Still Showing (Obsolete/Already Fixed)
+- ✅ No "DRIVERS:" label found in detail view
+- Ecosystem tags shown in project browser as "#rust", "#node", etc.
+- Field name still "drivers" in Project struct but displays correctly
 
 ---
 
