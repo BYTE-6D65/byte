@@ -115,6 +115,75 @@ This allows single byte.toml to manage multiple subprojects while staying within
 
 **Location**: `src/tui/mod.rs:449-455`
 
+## Path Management and Security
+
+### SafePath Abstraction
+**Decision**: Centralize all path handling through `SafePath` struct
+
+**Location**: `src/path/mod.rs`
+
+**Features**:
+- Tilde expansion (`~/path` → `/Users/name/path`)
+- Canonicalization (symlink resolution, absolute paths)
+- Path traversal protection in `join()` method
+- Remote path detection (SSH, UNC, URLs)
+- Permission validation
+- Triple representation: original/expanded/canonical
+
+**Why**:
+- Single source of truth for path operations
+- Consistent validation and error messages
+- Easier to test and maintain
+- Future-proofing for remote execution
+
+**Migration**: Replaced 16 scattered `shellexpand::tilde()` calls across codebase
+
+### Project Name Validation
+**Decision**: Strict validation to prevent path traversal and filesystem conflicts
+
+**Location**: `src/projects.rs:23-87`
+
+**Validation Rules**:
+1. **No path separators**: Blocks `/`, `\`, `\0`
+2. **Reserved names** (case-insensitive):
+   - Build artifacts: `target`, `node_modules`, `dist`, `build`, `out`
+   - IDE configs: `.vscode`, `.idea`, `.vs`, `.fleet`
+   - Git/Byte: `.git`, `.byte`
+   - Windows reserved: `CON`, `PRN`, `AUX`, `NUL`, `COM1-9`, `LPT1-9`
+3. **Length limit**: Max 255 bytes (filesystem limit)
+4. **Character set**: ASCII alphanumeric + `-_` only
+5. **Leading characters**: Cannot start with `.` (hidden) or `-` (flag)
+6. **Trailing characters**: Cannot end with `.` (Windows issue)
+
+**Example valid names**:
+- `my-project`, `MyProject`, `my_project`, `project123`
+- `app.v2`, `my-app.2024` (dots in middle are OK)
+
+**Example invalid names**:
+- `../../etc/evil` (path traversal)
+- `.hidden` (starts with dot)
+- `target` (reserved name)
+- `my project` (space not allowed)
+- `project@v2` (@ not allowed)
+
+**Integration**: Used in `init_project()` and TUI command parsing
+
+### Remote Path Planning
+**Decision**: Detect and reject remote paths **now**, with helpful error messages
+
+**Supported in future**: SSH (`user@host:/path`), UNC (`\\server\share`), URLs (`ssh://`, `sftp://`, `smb://`)
+
+**Current behavior**: SafePath rejects these with:
+```
+Remote URL paths not yet supported: ssh://user@host/path
+Remote execution is planned for a future release.
+```
+
+**Why helpful rejection over silent failure**:
+- Clear user feedback ("not yet supported" vs "invalid path")
+- Documents the feature for future implementation
+- Easy jump-back-in point (just change `bail!` to implementation)
+
 ## Future Considerations
 
 ### Potential Improvements

@@ -22,6 +22,9 @@ pub enum Commands {
         name: String,
     },
 
+    /// Discover and list all projects
+    Discover,
+
     /// Launch TUI
     Tui,
 }
@@ -54,6 +57,43 @@ pub fn run() -> Result<()> {
                 }
                 Err(e) => {
                     eprintln!("✗ Failed to create project: {}", e);
+                    Err(e)
+                }
+            }
+        }
+        Some(Commands::Discover) => {
+            println!("Discovering projects...\n");
+
+            match crate::projects::discover_projects(&config.global) {
+                Ok(projects) => {
+                    if projects.is_empty() {
+                        println!("No projects found.");
+                        println!("\nSearched in:");
+                        println!("  - Primary workspace: {}", config.global.workspace.path);
+                        for path in &config.global.workspace.registered {
+                            println!("  - Registered: {}", path);
+                        }
+                    } else {
+                        println!("Found {} project{}:\n",
+                            projects.len(),
+                            if projects.len() == 1 { "" } else { "s" }
+                        );
+
+                        for project in &projects {
+                            let ecosystem = &project.config.project.ecosystem;
+                            let project_type = &project.config.project.project_type;
+                            println!("  • {} ({}/{}) at {}",
+                                project.config.project.name,
+                                ecosystem,
+                                project_type,
+                                project.path.display()
+                            );
+                        }
+                    }
+                    Ok(())
+                }
+                Err(e) => {
+                    eprintln!("✗ Discovery failed: {}", e);
                     Err(e)
                 }
             }

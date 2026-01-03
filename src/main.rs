@@ -6,6 +6,7 @@ mod fs;
 mod log;
 mod projects;
 mod state;
+mod path;
 mod tui;
 
 fn main() {

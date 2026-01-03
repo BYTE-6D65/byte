@@ -296,7 +296,11 @@ impl App {
 
                 // Update project counts for workspaces
                 for workspace in &mut app.workspace_directories {
-                    let expanded_path = shellexpand::tilde(&workspace.path).to_string();
+                    let safe_path = match crate::path::SafePath::from_user_input(&workspace.path) {
+                        Ok(path) => path,
+                        Err(_) => continue, // Skip invalid paths
+                    };
+                    let expanded_path = safe_path.to_string();
                     let normalized_workspace = expanded_path.trim_end_matches('/').to_lowercase();
 
                     crate::log::info("COUNT", &format!("Counting projects for workspace: {}", expanded_path));
@@ -463,7 +467,11 @@ impl App {
             project.path.clone()
         } else {
             // No project selected: use target workspace (for init commands)
-            shellexpand::tilde(&self.get_target_workspace()).to_string()
+            let target_workspace = self.get_target_workspace();
+            match crate::path::SafePath::from_user_input(&target_workspace) {
+                Ok(safe_path) => safe_path.to_string(),
+                Err(_) => target_workspace, // Fallback to original if expansion fails
+            }
         };
 
         crate::log::info("EXEC", &format!("Executing: {} in {}", command_str, working_dir));
@@ -608,7 +616,10 @@ impl App {
             let mut candidates = Vec::new();
 
             // Expand and get directory to search
-            let expanded = shellexpand::tilde(&self.input_buffer).to_string();
+            let expanded = match crate::path::SafePath::from_user_input(&self.input_buffer) {
+                Ok(safe_path) => safe_path.to_string(),
+                Err(_) => self.input_buffer.clone(), // Use original if expansion fails
+            };
             let path = std::path::Path::new(&expanded);
 
             // Determine what we're completing
@@ -680,7 +691,10 @@ impl App {
         }
 
         // Expand tilde
-        let expanded = shellexpand::tilde(partial).to_string();
+        let expanded = match crate::path::SafePath::from_user_input(partial) {
+            Ok(safe_path) => safe_path.to_string(),
+            Err(_) => partial.to_string(), // Use original if expansion fails
+        };
         let path = Path::new(&expanded);
 
         // Determine search directory and prefix
@@ -1280,9 +1294,11 @@ impl App {
     pub fn get_workspace_for_project(&self, project_path: &str) -> String {
         // Find which workspace this project belongs to
         for workspace in &self.workspace_directories {
-            let expanded_workspace = shellexpand::tilde(&workspace.path).to_string();
-            if project_path.starts_with(&expanded_workspace) {
-                return workspace.path.clone();
+            if let Ok(safe_workspace) = crate::path::SafePath::from_user_input(&workspace.path) {
+                let expanded_workspace = safe_workspace.to_string();
+                if project_path.starts_with(&expanded_workspace) {
+                    return workspace.path.clone();
+                }
             }
         }
         // Fallback to showing the path
@@ -1330,7 +1346,11 @@ impl App {
 
                 // Update project counts for workspaces
                 for workspace in &mut self.workspace_directories {
-                    let expanded_path = shellexpand::tilde(&workspace.path).to_string();
+                    let safe_path = match crate::path::SafePath::from_user_input(&workspace.path) {
+                        Ok(path) => path,
+                        Err(_) => continue, // Skip invalid paths
+                    };
+                    let expanded_path = safe_path.to_string();
                     let normalized_workspace = expanded_path.trim_end_matches('/').to_lowercase();
                     workspace.project_count = self
                         .projects
@@ -1592,10 +1612,17 @@ fn setup_file_watcher(
 
     // Watch all workspace directories
     for workspace in &app.workspace_directories {
-        let expanded = shellexpand::tilde(&workspace.path).to_string();
+        let safe_path = match crate::path::SafePath::from_user_input(&workspace.path) {
+            Ok(path) => path,
+            Err(e) => {
+                crate::log::error("WATCHER", &format!("Invalid workspace path '{}': {}", workspace.path, e));
+                continue;
+            }
+        };
+        let expanded = safe_path.to_string();
         match debouncer
             .watcher()
-            .watch(std::path::Path::new(&expanded), RecursiveMode::Recursive)
+            .watch(safe_path.expanded(), RecursiveMode::Recursive)
         {
             Ok(_) => crate::log::info("WATCHER", &format!("Watching: {}", expanded)),
             Err(e) => crate::log::error("WATCHER", &format!("Failed to watch {}: {}", expanded, e)),
@@ -1705,7 +1732,10 @@ fn run_fuzzy_picker(current_input: &str) -> Option<String> {
 
         // If there's a partial path typed, add subdirectories
         if !current_input.is_empty() {
-            let expanded = shellexpand::tilde(current_input).to_string();
+            let expanded = match crate::path::SafePath::from_user_input(current_input) {
+                Ok(safe_path) => safe_path.to_string(),
+                Err(_) => current_input.to_string(), // Use original if expansion fails
+            };
             if let Ok(entries) = std::fs::read_dir(&expanded) {
                 for entry in entries.filter_map(|e| e.ok()) {
                     if entry
@@ -2502,7 +2532,7 @@ fn render_detail(f: &mut Frame, area: ratatui::layout::Rect, app: &App) {
 }
 
 /// Render git status information
-fn render_git_status(git: &GitStatus) -> Vec<Line> {
+fn render_git_status(git: &GitStatus) -> Vec<Line<'_>> {
     let mut lines = vec![];
 
     if !git.is_repo {
@@ -2584,7 +2614,7 @@ fn render_git_status(git: &GitStatus) -> Vec<Line> {
 }
 
 /// Render build state information
-fn render_build_state(build: &BuildState) -> Vec<Line> {
+fn render_build_state(build: &BuildState) -> Vec<Line<'_>> {
     use chrono::{DateTime, Utc};
 
     let mut lines = vec![];
@@ -2635,7 +2665,7 @@ fn render_build_state(build: &BuildState) -> Vec<Line> {
 }
 
 /// Render recent command logs
-fn render_recent_logs(project_path: &str, selected_log: usize) -> Vec<Line> {
+fn render_recent_logs(project_path: &str, selected_log: usize) -> Vec<Line<'_>> {
     let mut lines = vec![];
 
     lines.push(Line::from(vec![Span::styled(

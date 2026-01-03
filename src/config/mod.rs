@@ -57,40 +57,29 @@ impl Config {
 
     /// Add a workspace path to the registered list
     pub fn add_workspace_path(&mut self, path: &str) -> Result<()> {
-        // Expand tilde and normalize (remove trailing slashes)
-        let expanded = shellexpand::tilde(path).to_string();
-        let normalized = expanded.trim_end_matches('/').to_string();
-
-        // Validate path exists
-        let path_buf = PathBuf::from(&normalized);
-        if !path_buf.exists() {
-            anyhow::bail!("Path does not exist: {}", normalized);
-        }
-
-        if !path_buf.is_dir() {
-            anyhow::bail!("Path is not a directory: {}", normalized);
-        }
+        // Create SafePath and validate it's a directory
+        let safe_path = crate::path::SafePath::from_user_input(path)?;
+        safe_path.validate_directory()?;
 
         // Use canonical path for comparison (handles case-insensitivity and symlinks)
-        let canonical = path_buf
-            .canonicalize()
-            .map_err(|e| anyhow::anyhow!("Failed to canonicalize path: {}", e))?;
+        let canonical = safe_path.canonical().ok_or_else(|| {
+            anyhow::anyhow!("Failed to canonicalize path: {}", safe_path)
+        })?;
 
         // Check if already registered (compare canonical paths)
-        let primary_expanded = shellexpand::tilde(&self.global.workspace.path).to_string();
-        let primary_path = PathBuf::from(primary_expanded.trim_end_matches('/'));
-        if let Ok(primary_canonical) = primary_path.canonicalize() {
+        let primary_safe = crate::path::SafePath::from_user_input(&self.global.workspace.path)?;
+        if let Some(primary_canonical) = primary_safe.canonical() {
             if canonical == primary_canonical {
                 anyhow::bail!("Path is already the primary workspace");
             }
         }
 
         for registered in &self.global.workspace.registered {
-            let registered_expanded = shellexpand::tilde(registered).to_string();
-            let registered_path = PathBuf::from(registered_expanded.trim_end_matches('/'));
-            if let Ok(registered_canonical) = registered_path.canonicalize() {
-                if canonical == registered_canonical {
-                    anyhow::bail!("Path is already registered");
+            if let Ok(registered_safe) = crate::path::SafePath::from_user_input(registered) {
+                if let Some(registered_canonical) = registered_safe.canonical() {
+                    if canonical == registered_canonical {
+                        anyhow::bail!("Path is already registered");
+                    }
                 }
             }
         }
@@ -109,13 +98,16 @@ impl Config {
 
     /// Remove a workspace path from the registered list
     pub fn remove_workspace_path(&mut self, path: &str) -> Result<()> {
-        let expanded = shellexpand::tilde(path).to_string();
+        let safe_path = crate::path::SafePath::from_user_input(path)?;
 
-        // Find and remove the path (comparing expanded versions)
+        // Find and remove the path (comparing SafePath equality)
         let original_len = self.global.workspace.registered.len();
         self.global.workspace.registered.retain(|p| {
-            let p_expanded = shellexpand::tilde(p).to_string();
-            p_expanded != expanded
+            if let Ok(p_safe) = crate::path::SafePath::from_user_input(p) {
+                !safe_path.equals(&p_safe)
+            } else {
+                true // Keep paths that fail to parse
+            }
         });
 
         if self.global.workspace.registered.len() == original_len {

@@ -92,35 +92,47 @@ pub fn discover_projects(global_config: &GlobalConfig) -> Result<Vec<DiscoveredP
 
     // Scan workspace if auto_scan is enabled
     if global_config.workspace.auto_scan {
-        let workspace_path = shellexpand::tilde(&global_config.workspace.path).to_string();
-        crate::log::info("DISCOVERY", &format!("Scanning primary workspace: {}", workspace_path));
+        match crate::path::SafePath::from_user_input(&global_config.workspace.path) {
+            Ok(workspace_path) => {
+                crate::log::info("DISCOVERY", &format!("Scanning primary workspace: {}", workspace_path));
 
-        match scan_directory(&workspace_path) {
-            Ok(workspace_projects) => {
-                crate::log::info("DISCOVERY", &format!("Found {} projects in primary workspace", workspace_projects.len()));
-                projects.extend(workspace_projects);
+                match scan_directory(workspace_path.expanded()) {
+                    Ok(workspace_projects) => {
+                        crate::log::info("DISCOVERY", &format!("Found {} projects in primary workspace", workspace_projects.len()));
+                        projects.extend(workspace_projects);
+                    }
+                    Err(e) => {
+                        crate::log::error("DISCOVERY", &format!("Failed to scan primary workspace: {}", e));
+                    }
+                }
             }
             Err(e) => {
-                crate::log::error("DISCOVERY", &format!("Failed to scan primary workspace: {}", e));
+                crate::log::error("DISCOVERY", &format!("Invalid workspace path '{}': {}", global_config.workspace.path, e));
             }
         }
     }
 
     // Scan manually registered directories for projects
     for registered_path in &global_config.workspace.registered {
-        let expanded_path = shellexpand::tilde(registered_path).to_string();
-        crate::log::info("DISCOVERY", &format!("Scanning registered path: {}", expanded_path));
+        match crate::path::SafePath::from_user_input(registered_path) {
+            Ok(safe_path) => {
+                crate::log::info("DISCOVERY", &format!("Scanning registered path: {}", safe_path));
 
-        match scan_directory(&expanded_path) {
-            Ok(registered_projects) => {
-                crate::log::info("DISCOVERY", &format!("Found {} projects in {}", registered_projects.len(), expanded_path));
-                for proj in &registered_projects {
-                    crate::log::info("DISCOVERY", &format!("  - {} at {}", proj.config.project.name, proj.path.display()));
+                match scan_directory(safe_path.expanded()) {
+                    Ok(registered_projects) => {
+                        crate::log::info("DISCOVERY", &format!("Found {} projects in {}", registered_projects.len(), safe_path));
+                        for proj in &registered_projects {
+                            crate::log::info("DISCOVERY", &format!("  - {} at {}", proj.config.project.name, proj.path.display()));
+                        }
+                        projects.extend(registered_projects);
+                    }
+                    Err(e) => {
+                        crate::log::error("DISCOVERY", &format!("Failed to scan {}: {}", safe_path, e));
+                    }
                 }
-                projects.extend(registered_projects);
             }
             Err(e) => {
-                crate::log::error("DISCOVERY", &format!("Failed to scan {}: {}", expanded_path, e));
+                crate::log::error("DISCOVERY", &format!("Invalid registered path '{}': {}", registered_path, e));
             }
         }
     }
@@ -130,9 +142,8 @@ pub fn discover_projects(global_config: &GlobalConfig) -> Result<Vec<DiscoveredP
 }
 
 /// Scan a directory for byte.toml files
-fn scan_directory(path: &str) -> Result<Vec<DiscoveredProject>> {
+fn scan_directory(path: &Path) -> Result<Vec<DiscoveredProject>> {
     let mut projects = Vec::new();
-    let path = Path::new(path);
 
     crate::log::info("SCAN", &format!("Scanning directory: {}", path.display()));
 
@@ -202,9 +213,9 @@ pub fn init_project(
     // Validate project name for security and filesystem compatibility
     validate_project_name(name)?;
 
-    // Expand workspace path
-    let workspace = shellexpand::tilde(workspace_path).to_string();
-    let workspace_path = Path::new(&workspace);
+    // Expand and validate workspace path
+    let safe_workspace = crate::path::SafePath::from_user_input(workspace_path)?;
+    let workspace_path = safe_workspace.expanded();
 
     // Create workspace if it doesn't exist
     if !workspace_path.exists() {

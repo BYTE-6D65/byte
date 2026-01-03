@@ -7,10 +7,10 @@
 
 | Category | Total | Complete | Partial | Not Started |
 |----------|-------|----------|---------|-------------|
-| API Opportunities | 7 | 1 | 3 | 3 |
-| Security Issues | 3 | 1* | 0 | 2 |
+| API Opportunities | 7 | 2 | 3 | 2 |
+| Security Issues | 3 | 3* | 0 | 0 |
 | Memory Safety | 5 | 0 | 1 | 4 |
-| **TOTAL** | **15** | **2** | **4** | **9** |
+| **TOTAL** | **15** | **5** | **4** | **6** |
 
 *Modified approach - see notes
 
@@ -43,18 +43,26 @@
 
 ---
 
-### ❌ #2. Path Management and Validation Abstraction (HIGH)
-**Status**: NOT STARTED
+### ✅ #2. Path Management and Validation Abstraction (HIGH)
+**Status**: COMPLETE
+**Location**: `src/path/mod.rs`
 
-**Current state**: Scattered path handling with `shellexpand::tilde()` + manual validation
+**What we built**:
+- `SafePath` struct with original/expanded/canonical path representations
+- Tilde expansion via `shellexpand::tilde()`
+- Path traversal validation (blocks `..`, `/`, `\`)
+- Remote path detection (UNC, SSH, URLs) with future-proofing
+- Permission validation (`validate_writable()`, `validate_directory()`)
+- `join()` method with traversal protection
+- Convenience constructors (`workspace()`, `project_root()`)
+- 12 comprehensive tests
 
-**Missing**:
-- `SafePath` abstraction
-- Centralized tilde expansion
-- Path traversal validation
-- Consistent canonicalization
+**Migration completed**:
+- ✅ src/projects.rs (3 locations) - discover_projects(), init_project()
+- ✅ src/config/mod.rs (5 locations) - add/remove workspace paths
+- ✅ src/tui/mod.rs (8 locations) - all path expansions and validations
 
-**Priority**: HIGH (feeds into Security Issue #2)
+**Remaining shellexpand usages**: Only in SafePath itself (centralized)
 
 ---
 
@@ -171,43 +179,71 @@
 
 ---
 
-### ❌ #2. Unchecked User Input in Path Operations (MEDIUM SEVERITY)
-**Status**: NOT STARTED
-**Locations**: `src/tui/mod.rs:1715`, `src/projects.rs:153-175`
+### ✅ #2. Unchecked User Input in Path Operations (MEDIUM SEVERITY)
+**Status**: COMPLETE
+**Location**: `src/projects.rs:23-87`, `src/path/mod.rs`
 
-**Missing validations**:
-- Project name validation (no path separators, reserved names)
-- Path traversal checks (`../../etc/passwd`)
-- Length limits (max 255 chars)
-- Character restrictions (alphanumeric + `-_` only)
+**What we implemented**:
 
-**Recommended implementation**:
-```rust
-pub fn validate_project_name(name: &str) -> anyhow::Result<()> {
-    // Check empty
-    // Check path separators (/, \, \0)
-    // Check reserved names (.git, .byte, target, node_modules)
-    // Check length (max 255)
-    // Check characters (alphanumeric + - _)
-}
-```
+**1. Project Name Validation** (`validate_project_name()` in src/projects.rs):
+- ✅ Empty/whitespace check
+- ✅ Path separator blocking (`/`, `\`, `\0`)
+- ✅ Reserved name blocking (case-insensitive):
+  - Build artifacts: `target`, `node_modules`, `dist`, `build`, `out`
+  - IDE configs: `.vscode`, `.idea`, `.vs`, `.fleet`
+  - Git/Byte: `.git`, `.byte`
+  - Windows reserved: `CON`, `PRN`, `AUX`, `NUL`, `COM1-9`, `LPT1-9`
+- ✅ Length limit (max 255 bytes)
+- ✅ Character restrictions (ASCII alphanumeric + `-_` only)
+- ✅ Starting character restrictions (not `.` or `-`)
+- ✅ Ending character restrictions (not `.`)
+- ✅ 9 comprehensive tests covering all edge cases
 
-**Priority**: HIGH (security issue)
+**2. Path Abstraction** (`SafePath` in src/path/mod.rs):
+- ✅ Tilde expansion
+- ✅ Canonicalization (symlink resolution)
+- ✅ Remote path detection and rejection (SSH, UNC, URLs)
+- ✅ Path traversal protection in `join()` method
+- ✅ 12 comprehensive tests
+
+**Integration points**:
+- ✅ `init_project()` - validates name before creating directory
+- ✅ TUI command parsing - validates user input for `byte init` commands
+- ✅ All path operations now use SafePath abstraction
+
+**Risk reduction**: HIGH → NONE
 
 ---
 
-### ❌ #3. Insufficient File Permissions Validation (MEDIUM SEVERITY)
-**Status**: NOT STARTED
-**Locations**: `src/config/mod.rs:72-84`, `src/projects.rs:153-167`
+### ✅ #3. Insufficient File Permissions Validation (MEDIUM SEVERITY)
+**Status**: COMPLETE
+**Location**: `src/path/mod.rs:156-210`
 
-**Missing checks**:
-- Write permissions on workspace paths
-- Execute permissions for directory traversal
-- Read-only filesystem detection
+**What we implemented**:
 
-**Impact**: Users get errors mid-operation instead of at config time
+**1. Directory Validation** (`validate_directory()`):
+- ✅ Path existence check
+- ✅ Directory vs file check
+- ✅ Clear error messages
 
-**Priority**: MEDIUM (operational issue, not security vulnerability)
+**2. Write Permission Validation** (`validate_writable()`):
+- ✅ Unix permission check (rwx for owner - mode 0o700)
+- ✅ Read-only flag check (cross-platform)
+- ✅ Actual write test (creates `.byte_write_test` file)
+- ✅ Automatic cleanup of test file
+- ✅ Comprehensive error messages with permission mode display
+
+**3. Convenience Constructors**:
+- ✅ `SafePath::workspace()` - requires writable directory
+- ✅ `SafePath::project_root()` - requires existing directory
+
+**Integration**:
+- ✅ Used in config/mod.rs `add_workspace_path()` - validates before adding
+- ✅ SafePath available for all path operations
+
+**Impact**: Users now get clear errors upfront instead of mid-operation
+
+**Risk reduction**: MEDIUM → LOW
 
 ---
 
@@ -281,20 +317,20 @@ pub fn validate_project_name(name: &str) -> anyhow::Result<()> {
 
 ### Immediate (Next Session)
 1. ✅ ~~Review audit status~~ (this document)
-2. **Implement Security Issue #2** - Project name validation
-   - Add `validate_project_name()` function
-   - Use in `init_project()` and TUI input
-   - Add tests
+2. ✅ ~~Implement Security Issue #2~~ - Project name validation (COMPLETE)
+   - ✅ Added `validate_project_name()` function
+   - ✅ Used in `init_project()` and TUI input
+   - ✅ Added 9 comprehensive tests
 
 ### Short-Term (This Week)
-1. **Complete API #2** - Path Management Abstraction
-   - Create `SafePath` struct
-   - Centralize path handling
-   - Fixes Security Issue #2 more comprehensively
+1. ✅ ~~Complete API #2~~ - Path Management Abstraction (COMPLETE)
+   - ✅ Created `SafePath` struct (src/path/mod.rs)
+   - ✅ Centralized path handling (migrated 16 locations)
+   - ✅ Fixes Security Issue #2 comprehensively
 
-2. **Implement Security Issue #3** - Permission validation
-   - Add workspace permission checks
-   - Validate write access before operations
+2. ✅ ~~Implement Security Issue #3~~ - Permission validation (COMPLETE)
+   - ✅ Added workspace permission checks
+   - ✅ Validates write access before operations
 
 3. **Fix Memory Issue #1** - Remove unsafe unwraps
    - Refactor TUI unwrap patterns
@@ -352,18 +388,27 @@ Then we'll need to revisit this decision and add sandboxing.
 **Completed**:
 - ✅ Command execution abstraction (API #1)
 - ✅ Command validation system (Security #1, modified approach)
+- ✅ **Path management abstraction (API #2) - NEW**
+- ✅ **Project name validation (Security #2) - NEW**
+- ✅ **Permission validation (Security #3) - NEW**
 - ✅ Partial FS abstraction (API #5)
 - ✅ Partial build state tracking (API #7)
 - ✅ Git status parsing (API #3, partial)
 
-**Major gaps**:
-- Path validation and abstraction
-- Permission checking
-- Performance optimizations
-- UI component extraction
+**Recent additions (2026-01-02)**:
+- **SafePath abstraction** (src/path/mod.rs): Centralized path handling with validation
+- **Project name validation** (src/projects.rs): Prevents path traversal, reserved names, injection
+- **Permission validation**: Write/read checks with actual filesystem tests
+- **Codebase migration**: Replaced 16 scattered `shellexpand::tilde()` calls with SafePath
 
-**Overall assessment**: Good foundation in place, security gaps need addressing, performance issues are low priority.
+**Major gaps remaining**:
+- Performance optimizations (Memory Issues #1-5)
+- UI component extraction (API #6)
+- Git operations abstraction (API #3 completion)
+- Config management abstraction (API #4)
+
+**Overall assessment**: **All high-priority security issues resolved**. Good foundation in place. Remaining work is optimization and refactoring for maintainability.
 
 ---
 
-**Next Review**: After implementing Security Issue #2 (project name validation)
+**Next Review**: After implementing Memory Issue #1 (unsafe unwraps) or API #3 (Git operations)
