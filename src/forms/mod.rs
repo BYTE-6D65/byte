@@ -439,6 +439,7 @@ impl FormField {
 /// Extracted form values
 #[derive(Clone, Debug)]
 pub enum FormValue {
+    #[allow(dead_code)]
     Text(String),
     // Future: Email validation
     #[allow(dead_code)]
@@ -446,6 +447,7 @@ pub enum FormValue {
     // Future: Numeric values
     #[allow(dead_code)]
     Number(i64),
+    #[allow(dead_code)]
     Bool(bool),
     // Future: Path selection
     #[allow(dead_code)]

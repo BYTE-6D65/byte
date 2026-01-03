@@ -20,6 +20,7 @@ use std::path::{Path, PathBuf};
 #[derive(Debug, Clone)]
 pub struct SafePath {
     /// Original user input (e.g., "~/projects")
+    #[allow(dead_code)]
     original: String,
 
     /// Expanded path with tilde replaced (e.g., "/Users/name/projects")
@@ -121,6 +122,7 @@ impl SafePath {
     }
 
     /// Get the original user input
+    #[allow(dead_code)]
     pub fn original(&self) -> &str {
         &self.original
     }
@@ -128,6 +130,7 @@ impl SafePath {
     /// Get the best available path representation
     ///
     /// Returns canonical if available, otherwise expanded
+    #[allow(dead_code)]
     pub fn as_path(&self) -> &Path {
         self.canonical().unwrap_or(self.expanded())
     }
@@ -160,6 +163,7 @@ impl SafePath {
     /// - Read, write, and execute permissions (Unix)
     /// - Not read-only (cross-platform)
     /// - Can actually create files (test write)
+    #[allow(dead_code)]
     pub fn validate_writable(&self) -> Result<()> {
         // Must be a directory first
         self.validate_directory()?;
@@ -231,6 +235,7 @@ impl SafePath {
     /// let subdir = base.join("mydir").unwrap();
     /// assert!(subdir.expanded().ends_with("mydir"));
     /// ```
+    #[allow(dead_code)]
     pub fn join(&self, component: &str) -> Result<SafePath> {
         // Validate component doesn't contain path separators
         if component.contains('/') || component.contains('\\') {
@@ -262,6 +267,7 @@ impl SafePath {
     /// Create SafePath for a workspace (must be writable directory)
     ///
     /// Convenience wrapper that validates writability
+    #[allow(dead_code)]
     pub fn workspace(path: &str) -> Result<Self> {
         let safe = Self::from_user_input(path)?;
         safe.validate_writable()?;
@@ -271,6 +277,7 @@ impl SafePath {
     /// Create SafePath for a project root (must be existing directory)
     ///
     /// Convenience wrapper that validates directory exists
+    #[allow(dead_code)]
     pub fn project_root(path: &str) -> Result<Self> {
         let safe = Self::from_user_input(path)?;
         safe.validate_directory()?;
