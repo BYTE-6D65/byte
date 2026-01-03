@@ -794,6 +794,7 @@ impl App {
                 && !matches!(self.current_view, View::Form) =>
             {
                 self.current_view = View::ProjectBrowser;
+                self.command_result_display = None; // Clear command result on view switch
                 self.status_message = "Viewing projects".to_string();
             }
             KeyCode::Char('2')
@@ -802,6 +803,7 @@ impl App {
             {
                 self.current_view = View::CommandPalette;
                 self.update_commands();
+                self.command_result_display = None; // Clear command result on view switch
                 self.status_message = "Viewing commands".to_string();
             }
             KeyCode::Char('3')
@@ -810,6 +812,7 @@ impl App {
             {
                 self.current_view = View::Detail;
                 self.selected_log = 0; // Reset log selection
+                self.command_result_display = None; // Clear command result on view switch
                 self.status_message = format!(
                     "Viewing details for: {}",
                     self.projects
@@ -823,6 +826,7 @@ impl App {
                 && !matches!(self.current_view, View::Form) =>
             {
                 self.current_view = View::WorkspaceManager;
+                self.command_result_display = None; // Clear command result on view switch
                 self.status_message = "Managing workspace directories".to_string();
             }
             // Workspace Manager specific keys
