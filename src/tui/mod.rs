@@ -1694,6 +1694,31 @@ fn fuzzy_match(haystack: &str, needle: &str) -> bool {
     true
 }
 
+/// Truncate a path string to fit within max_width, preserving start and end
+fn truncate_path(path: &str, max_width: usize) -> String {
+    if path.len() <= max_width {
+        return path.to_string();
+    }
+
+    if max_width <= 3 {
+        return "...".to_string();
+    }
+
+    // Reserve 3 chars for "..."
+    let available = max_width.saturating_sub(3);
+    let start_len = (available + 1) / 2; // Slightly favor start
+    let end_len = available / 2;
+
+    let start = &path[..start_len.min(path.len())];
+    let end = if path.len() >= end_len {
+        &path[path.len() - end_len..]
+    } else {
+        ""
+    };
+
+    format!("{}...{}", start, end)
+}
+
 /// Launch fuzzy finder for directory selection
 fn run_fuzzy_picker(current_input: &str) -> Option<String> {
     use skim::prelude::*;
@@ -2160,10 +2185,12 @@ fn render_project_browser(f: &mut Frame, area: ratatui::layout::Rect, app: &App)
             ];
 
             // Line 2: Description (left) | empty (right)
+            let max_desc_width = total_width.saturating_sub(2); // Account for "  " indent
+            let truncated_desc = truncate_path(&project.description, max_desc_width);
             let line2 = vec![
                 Span::raw("  "),
                 Span::styled(
-                    project.description.clone(),
+                    truncated_desc,
                     Style::default().fg(theme::TEXT_SECONDARY),
                 ),
             ];
@@ -2325,10 +2352,12 @@ fn render_command_palette(f: &mut Frame, area: ratatui::layout::Rect, app: &App)
             ];
 
             // Line 2: Description (left) | empty (right)
+            let max_desc_width = total_width.saturating_sub(2); // Account for "  " indent
+            let truncated_desc = truncate_path(&cmd.description, max_desc_width);
             let line2 = vec![
                 Span::raw("  "),
                 Span::styled(
-                    cmd.description.clone(),
+                    truncated_desc,
                     Style::default().fg(theme::TEXT_SECONDARY),
                 ),
             ];
@@ -2455,6 +2484,12 @@ fn render_detail(f: &mut Frame, area: ratatui::layout::Rect, app: &App) {
             // Full 2-column layout when not viewing log
             let total_width = details_area.width.saturating_sub(4) as usize;
             let left_width = (total_width * 70) / 100;
+            let right_width = total_width.saturating_sub(left_width);
+
+            // Truncate path to fit in right column (accounting for "PATH: " prefix)
+            let path_prefix = "PATH: ";
+            let max_path_width = right_width.saturating_sub(path_prefix.len());
+            let truncated_path = truncate_path(&project.path, max_path_width);
 
             lines.push(Line::from(vec![
                 Span::styled(
@@ -2464,7 +2499,7 @@ fn render_detail(f: &mut Frame, area: ratatui::layout::Rect, app: &App) {
                         .add_modifier(Modifier::BOLD),
                 ),
                 Span::styled(
-                    format!("PATH: {}", project.path),
+                    format!("{}{}", path_prefix, truncated_path),
                     Style::default().fg(theme::TEXT_SECONDARY),
                 ),
             ]));
@@ -2790,6 +2825,12 @@ fn render_log_preview(f: &mut Frame, area: ratatui::layout::Rect, log_path: &Pat
     // Create lines to display
     let mut display_lines = vec![];
 
+    // Calculate available width for path truncation (account for borders: 2 chars)
+    let available_width = area.width.saturating_sub(2) as usize;
+    let path_prefix = "PATH: ";
+    let max_path_width = available_width.saturating_sub(path_prefix.len());
+    let truncated_project_path = truncate_path(project_path, max_path_width);
+
     // Ultra-compact 2-line header
     display_lines.push(Line::from(vec![
         Span::styled(filename, Style::default().fg(theme::ACCENT).add_modifier(Modifier::BOLD)),
@@ -2801,7 +2842,7 @@ fn render_log_preview(f: &mut Frame, area: ratatui::layout::Rect, log_path: &Pat
     ]));
     display_lines.push(Line::from(vec![
         Span::styled(
-            format!("PATH: {}", project_path),
+            format!("{}{}", path_prefix, truncated_project_path),
             Style::default().fg(theme::TEXT_SECONDARY),
         ),
     ]));
