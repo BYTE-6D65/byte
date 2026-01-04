@@ -37,6 +37,20 @@ See [ROADMAP.md](./ROADMAP.md) for planned features including:
 
 ## Recently Fixed
 
+### UTF-8 Text Corruption in Log Viewer and Path Displays (Fixed 2026-01-03)
+- ✅ Fixed byte-based slicing breaking multi-byte UTF-8 characters
+- ✅ Converted `strip_ansi_codes()` from byte-based to character-based iteration
+- ✅ Fixed log viewer truncation to use character-based slicing
+- ✅ Fixed `truncate_path()` helper to use character-based slicing
+- ✅ Fixed 5 additional path display locations using byte slicing:
+  - Project browser workspace paths (src/tui/mod.rs:2226)
+  - Command palette target paths (src/tui/mod.rs:2393)
+  - Workspace manager paths (src/tui/mod.rs:3000)
+  - Footer input buffer (src/tui/mod.rs:3080)
+  - Fuzzy picker paths (src/tui/mod.rs:3139)
+- Text bleed showing fragments like `[buimodified:`, `erving`, isolated chars completely resolved
+- All string truncation now UTF-8 safe across entire codebase
+
 ### Text Overrun in Views (Fixed 2026-01-03)
 - ✅ Created `truncate_path()` helper in `src/tui/mod.rs`
 - ✅ Fixed detail view PATH text overflow

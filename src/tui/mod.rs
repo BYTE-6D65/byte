@@ -1700,7 +1700,9 @@ fn fuzzy_match(haystack: &str, needle: &str) -> bool {
 
 /// Truncate a path string to fit within max_width, preserving start and end
 fn truncate_path(path: &str, max_width: usize) -> String {
-    if path.len() <= max_width {
+    let char_count = path.chars().count();
+
+    if char_count <= max_width {
         return path.to_string();
     }
 
@@ -1713,12 +1715,10 @@ fn truncate_path(path: &str, max_width: usize) -> String {
     let start_len = (available + 1) / 2; // Slightly favor start
     let end_len = available / 2;
 
-    let start = &path[..start_len.min(path.len())];
-    let end = if path.len() >= end_len {
-        &path[path.len() - end_len..]
-    } else {
-        ""
-    };
+    // Use character-based iteration to avoid breaking UTF-8
+    let start: String = path.chars().take(start_len).collect();
+    let end: String = path.chars().rev().take(end_len).collect::<Vec<_>>()
+        .into_iter().rev().collect();
 
     format!("{}...{}", start, end)
 }
@@ -1726,60 +1726,59 @@ fn truncate_path(path: &str, max_width: usize) -> String {
 /// Strip ANSI escape codes from a string (aggressive full coverage)
 fn strip_ansi_codes(input: &str) -> String {
     let mut result = String::with_capacity(input.len());
-    let bytes = input.as_bytes();
-    let mut i = 0;
+    let mut chars = input.chars().peekable();
 
-    while i < bytes.len() {
-        if bytes[i] == b'\x1b' && i + 1 < bytes.len() {
+    while let Some(ch) = chars.next() {
+        if ch == '\x1b' {
             // ESC sequence detected
-            i += 1;
-            match bytes[i] {
-                b'[' => {
+            match chars.peek() {
+                Some(&'[') => {
                     // CSI sequence: ESC [ ... letter
-                    i += 1;
-                    while i < bytes.len() {
-                        let b = bytes[i];
-                        i += 1;
-                        // CSI terminators: 0x40-0x7E (@ through ~)
-                        if (b >= 0x40 && b <= 0x7E) {
+                    chars.next(); // consume '['
+                    while let Some(&next_ch) = chars.peek() {
+                        chars.next();
+                        // CSI terminators are ASCII letters (A-Z, a-z) or @ through ~
+                        if next_ch.is_ascii_alphabetic() || ('@'..='~').contains(&next_ch) {
                             break;
                         }
                     }
                 }
-                b']' => {
-                    // OSC sequence: ESC ] ... ESC \ or BEL
-                    i += 1;
-                    while i < bytes.len() {
-                        if bytes[i] == b'\x07' {
+                Some(&']') => {
+                    // OSC sequence: ESC ] ... BEL or ESC \
+                    chars.next(); // consume ']'
+                    while let Some(&next_ch) = chars.peek() {
+                        if next_ch == '\x07' {
                             // BEL terminator
-                            i += 1;
+                            chars.next();
                             break;
                         }
-                        if bytes[i] == b'\x1b' && i + 1 < bytes.len() && bytes[i + 1] == b'\\' {
-                            // ESC \ terminator
-                            i += 2;
-                            break;
+                        if next_ch == '\x1b' {
+                            chars.next(); // consume ESC
+                            if chars.peek() == Some(&'\\') {
+                                // ESC \ terminator
+                                chars.next();
+                                break;
+                            }
+                        } else {
+                            chars.next();
                         }
-                        i += 1;
                     }
                 }
-                b'(' | b')' => {
+                Some(&'(') | Some(&')') => {
                     // Character set selection: ESC ( X or ESC ) X
-                    i += 1; // Skip the next character
+                    chars.next(); // consume '(' or ')'
+                    chars.next(); // skip the next character
                 }
                 _ => {
                     // Other ESC sequences, skip one more character
-                    i += 1;
+                    chars.next();
                 }
             }
-        } else if bytes[i] >= 0x20 || bytes[i] == b'\t' || bytes[i] == b'\n' || bytes[i] == b'\r' {
+        } else if ch >= ' ' || ch == '\t' || ch == '\n' || ch == '\r' {
             // Printable character or whitespace
-            result.push(bytes[i] as char);
-            i += 1;
-        } else {
-            // Control character, skip it
-            i += 1;
+            result.push(ch);
         }
+        // Skip control characters
     }
 
     result
@@ -2222,9 +2221,10 @@ fn render_project_browser(f: &mut Frame, area: ratatui::layout::Rect, app: &App)
 
             // Show workspace instead of full path
             let workspace_path = app.get_workspace_for_project(&project.path);
-            let display_path = if workspace_path.len() > location_width {
-                let start = workspace_path.len() - location_width + 1;
-                format!("…{}", &workspace_path[start..])
+            let display_path = if workspace_path.chars().count() > location_width {
+                let skip = workspace_path.chars().count() - location_width + 1;
+                let truncated: String = workspace_path.chars().skip(skip).collect();
+                format!("…{}", truncated)
             } else {
                 workspace_path
             };
@@ -2389,9 +2389,10 @@ fn render_command_palette(f: &mut Frame, area: ratatui::layout::Rect, app: &App)
                 app.get_target_workspace()
             };
 
-            let display_target = if target_path.len() > target_width {
-                let start = target_path.len() - target_width + 1;
-                format!("…{}", &target_path[start..])
+            let display_target = if target_path.chars().count() > target_width {
+                let skip = target_path.chars().count() - target_width + 1;
+                let truncated: String = target_path.chars().skip(skip).collect();
+                format!("…{}", truncated)
             } else {
                 target_path
             };
@@ -2913,13 +2914,16 @@ fn render_log_preview(f: &mut Frame, area: ratatui::layout::Rect, log_path: &Pat
         ),
     ]));
 
-    // Add visible lines with truncation (prevents text bleed from long lines)
+    // Add visible lines with character-based truncation (prevents text bleed)
     let content_width = available_width; // Full width for log content
     for line in content.iter().skip(start_line).take(end_line - start_line) {
-        // Strip ANSI codes and truncate to fit width
+        // Strip ANSI codes and truncate to fit width (character-based, not byte-based)
         let stripped = strip_ansi_codes(line);
-        let truncated = if stripped.len() > content_width {
-            format!("{}…", &stripped[..content_width.saturating_sub(1)])
+        let char_count = stripped.chars().count();
+        let truncated = if char_count > content_width {
+            // Use character-based truncation to avoid breaking UTF-8
+            let truncated_chars: String = stripped.chars().take(content_width.saturating_sub(1)).collect();
+            format!("{}…", truncated_chars)
         } else {
             stripped
         };
@@ -2993,9 +2997,10 @@ fn render_workspace_manager(f: &mut Frame, area: ratatui::layout::Rect, app: &Ap
             let mut line1 = vec![Span::raw("  ")];
 
             // Truncate path if too long - show end of path (most relevant part)
-            let display_path = if workspace.path.len() > max_path_width {
-                let start_idx = workspace.path.len() - max_path_width + 1; // +1 for ellipsis
-                format!("…{}", &workspace.path[start_idx..])
+            let display_path = if workspace.path.chars().count() > max_path_width {
+                let skip = workspace.path.chars().count() - max_path_width + 1; // +1 for ellipsis
+                let truncated: String = workspace.path.chars().skip(skip).collect();
+                format!("…{}", truncated)
             } else {
                 workspace.path.clone()
             };
@@ -3069,13 +3074,14 @@ fn render_workspace_manager(f: &mut Frame, area: ratatui::layout::Rect, app: &Ap
             .saturating_sub((2 + label.len() + 1) as u16) as usize;
 
         // Create input line with truncated buffer if needed
-        let input_line = if app.input_buffer.len() > available_width {
-            let start_idx = app.input_buffer.len() - available_width;
+        let input_line = if app.input_buffer.chars().count() > available_width {
+            let skip = app.input_buffer.chars().count() - available_width;
+            let truncated: String = app.input_buffer.chars().skip(skip).collect();
             Line::from(vec![
                 Span::raw("  "),
                 Span::styled(label, Style::default().fg(theme::TEXT_SECONDARY)),
                 Span::styled(
-                    format!("…{}", &app.input_buffer[start_idx..]),
+                    format!("…{}", truncated),
                     Style::default()
                         .fg(theme::ACCENT)
                         .add_modifier(Modifier::BOLD),
@@ -3132,9 +3138,10 @@ fn render_workspace_manager(f: &mut Frame, area: ratatui::layout::Rect, app: &Ap
                 let is_selected = actual_idx == app.fuzzy_selected && app.fuzzy_browsing;
 
                 // Truncate path if too long - show end of path (most relevant part)
-                let display_path = if path.len() > max_path_width {
-                    let start_idx = path.len() - max_path_width + 1; // +1 for ellipsis
-                    format!("…{}", &path[start_idx..])
+                let display_path = if path.chars().count() > max_path_width {
+                    let skip = path.chars().count() - max_path_width + 1; // +1 for ellipsis
+                    let truncated: String = path.chars().skip(skip).collect();
+                    format!("…{}", truncated)
                 } else {
                     path.clone()
                 };
