@@ -75,8 +75,8 @@ impl Logger {
             return global_log;
         }
 
-        // Last resort: /tmp
-        PathBuf::from("/tmp/byte.log")
+        // Last resort: system temp directory (cross-platform)
+        std::env::temp_dir().join("byte.log")
     }
 
     /// Write a log entry (filtered by min_level)
