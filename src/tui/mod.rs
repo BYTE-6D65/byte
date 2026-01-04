@@ -767,7 +767,27 @@ impl App {
         }
     }
 
-    fn handle_new_project_form(&mut self, values: std::collections::HashMap<String, crate::forms::FormValue>) {
+    /// Single dispatch point for all form submissions
+    /// Compiler enforces exhaustive handling of all FormType variants
+    fn handle_form_submission(&mut self, form_type: crate::forms::FormType, values: std::collections::HashMap<String, crate::forms::FormValue>) {
+        use crate::forms::FormType;
+
+        match form_type {
+            FormType::NewProject => self.submit_new_project(values),
+            FormType::GitTag => self.submit_git_tag(values),
+            FormType::EditCommand => {
+                // Future: handle command editing
+                self.status_message = "Command editing not yet implemented".to_string();
+            }
+            FormType::CommandHistory => {
+                // Future: handle command history
+                self.status_message = "Command history not yet implemented".to_string();
+            }
+        }
+    }
+
+    /// Handle new project creation form submission
+    fn submit_new_project(&mut self, values: std::collections::HashMap<String, crate::forms::FormValue>) {
         use crate::forms::FormValue;
 
         // Extract form values
@@ -828,6 +848,12 @@ impl App {
         }
     }
 
+    /// Handle git tag creation form submission
+    fn submit_git_tag(&mut self, _values: std::collections::HashMap<String, crate::forms::FormValue>) {
+        // Future: implement git tag creation
+        self.status_message = "Git tag creation not yet implemented".to_string();
+    }
+
     pub fn handle_key(&mut self, key: KeyCode) {
         match key {
             KeyCode::Char('q') | KeyCode::Char('Q') => self.quit(),
@@ -854,7 +880,7 @@ impl App {
                     vec!["~/projects".to_string()] // Fallback
                 };
 
-                let form = crate::forms::Form::new("Create New Project")
+                let form = crate::forms::Form::new("Create New Project", crate::forms::FormType::NewProject)
                     .description("Initialize a new project with byte scaffolding")
                     .select("workspace", "Target Workspace", workspace_options)
                     .select("ecosystem", "Ecosystem", vec![
@@ -879,7 +905,7 @@ impl App {
                     && matches!(self.input_mode, InputMode::Normal) =>
             {
                 // Git tag creation form (from Details view with git status)
-                let form = crate::forms::Form::new("Create Git Tag")
+                let form = crate::forms::Form::new("Create Git Tag", crate::forms::FormType::GitTag)
                     .description("Create a new Git tag for this project")
                     .text_input("tag_name", "Tag Name", "v1.0.0")
                     .text_area("message", "Tag Message", "Release notes...", 4)
@@ -1327,16 +1353,11 @@ impl App {
                 View::Form => {
                     // Submit form on Enter
                     if let Some(form) = &mut self.active_form {
-                        let form_title = form.title.clone();
+                        let form_type = form.form_type;
                         match form.submit() {
                             Ok(values) => {
-                                // Handle different form types
-                                if form_title == "Create New Project" {
-                                    self.handle_new_project_form(values);
-                                } else {
-                                    // Other forms (e.g., Git Tag)
-                                    self.status_message = "Form submitted".to_string();
-                                }
+                                // Dispatch to handler based on form type
+                                self.handle_form_submission(form_type, values);
                                 self.active_form = None;
                                 self.current_view = View::ProjectBrowser;
                             }

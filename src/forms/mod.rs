@@ -3,10 +3,26 @@
 
 use std::collections::HashMap;
 
+/// Form type identifier for dispatch and handling
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FormType {
+    /// Create a new project with scaffolding
+    NewProject,
+    /// Create a Git tag
+    GitTag,
+    /// Edit command before execution (future)
+    #[allow(dead_code)]
+    EditCommand,
+    /// Re-run or edit command from history (future)
+    #[allow(dead_code)]
+    CommandHistory,
+}
+
 /// A complete form with multiple fields
 #[derive(Clone, Debug)]
 pub struct Form {
     pub title: String,
+    pub form_type: FormType,
     pub description: Option<String>,
     pub fields: Vec<FormField>,
     pub current_field: usize,
@@ -15,9 +31,10 @@ pub struct Form {
 }
 
 impl Form {
-    pub fn new(title: impl Into<String>) -> Self {
+    pub fn new(title: impl Into<String>, form_type: FormType) -> Self {
         Self {
             title: title.into(),
+            form_type,
             description: None,
             fields: vec![],
             current_field: 0,
