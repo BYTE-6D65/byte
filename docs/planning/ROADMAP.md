@@ -23,6 +23,37 @@
 
 ### Phase 1: Core Workflow (v0.5.0)
 
+#### New Project Creation Flow
+**Priority**: CRITICAL
+**Status**: Missing fundamental workflow
+
+Currently byte has:
+- ✅ Tools to initialize projects (`byte init`, `init_project()` API)
+- ✅ Forms system for input collection
+- ✅ Workspace management
+- ❌ **No TUI flow to create new projects interactively**
+
+Proposed flow:
+1. Press `n` in project browser → Enter "Create New Project" mode
+2. Multi-step form using existing forms system:
+   - **Step 1**: Select target workspace (from registered workspaces)
+   - **Step 2**: Choose ecosystem (Rust/Go/Bun/Node)
+   - **Step 3**: Choose project type (CLI/Web/Library)
+   - **Step 4**: Enter project name (with validation)
+   - **Step 5**: Optional description
+3. Show confirmation with full path preview
+4. Execute creation using existing `init_project()` function
+5. Auto-reload projects and select newly created project
+
+Implementation notes:
+- Reuse `forms/mod.rs` for multi-step input
+- Reuse `projects::init_project()` for actual creation
+- Reuse `validate_project_name()` for name validation
+- Add workspace picker (similar to fuzzy path picker)
+- All infrastructure exists - just needs the flow wired up
+
+---
+
 #### Real-time Command Output
 **Priority**: HIGH
 - Stream stdout/stderr as commands execute
