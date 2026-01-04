@@ -1723,26 +1723,62 @@ fn truncate_path(path: &str, max_width: usize) -> String {
     format!("{}...{}", start, end)
 }
 
-/// Strip ANSI escape codes from a string
+/// Strip ANSI escape codes from a string (aggressive full coverage)
 fn strip_ansi_codes(input: &str) -> String {
     let mut result = String::with_capacity(input.len());
-    let mut chars = input.chars().peekable();
+    let bytes = input.as_bytes();
+    let mut i = 0;
 
-    while let Some(ch) = chars.next() {
-        if ch == '\x1b' {
-            // Skip ESC sequence
-            if chars.peek() == Some(&'[') {
-                chars.next(); // Skip '['
-                // Skip until we hit a letter (CSI terminator)
-                while let Some(&next_ch) = chars.peek() {
-                    chars.next();
-                    if next_ch.is_ascii_alphabetic() {
-                        break;
+    while i < bytes.len() {
+        if bytes[i] == b'\x1b' && i + 1 < bytes.len() {
+            // ESC sequence detected
+            i += 1;
+            match bytes[i] {
+                b'[' => {
+                    // CSI sequence: ESC [ ... letter
+                    i += 1;
+                    while i < bytes.len() {
+                        let b = bytes[i];
+                        i += 1;
+                        // CSI terminators: 0x40-0x7E (@ through ~)
+                        if (b >= 0x40 && b <= 0x7E) {
+                            break;
+                        }
                     }
                 }
+                b']' => {
+                    // OSC sequence: ESC ] ... ESC \ or BEL
+                    i += 1;
+                    while i < bytes.len() {
+                        if bytes[i] == b'\x07' {
+                            // BEL terminator
+                            i += 1;
+                            break;
+                        }
+                        if bytes[i] == b'\x1b' && i + 1 < bytes.len() && bytes[i + 1] == b'\\' {
+                            // ESC \ terminator
+                            i += 2;
+                            break;
+                        }
+                        i += 1;
+                    }
+                }
+                b'(' | b')' => {
+                    // Character set selection: ESC ( X or ESC ) X
+                    i += 1; // Skip the next character
+                }
+                _ => {
+                    // Other ESC sequences, skip one more character
+                    i += 1;
+                }
             }
+        } else if bytes[i] >= 0x20 || bytes[i] == b'\t' || bytes[i] == b'\n' || bytes[i] == b'\r' {
+            // Printable character or whitespace
+            result.push(bytes[i] as char);
+            i += 1;
         } else {
-            result.push(ch);
+            // Control character, skip it
+            i += 1;
         }
     }
 
