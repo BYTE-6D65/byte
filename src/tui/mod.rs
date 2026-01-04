@@ -767,6 +767,67 @@ impl App {
         }
     }
 
+    fn handle_new_project_form(&mut self, values: std::collections::HashMap<String, crate::forms::FormValue>) {
+        use crate::forms::FormValue;
+
+        // Extract form values
+        let workspace = if let Some(FormValue::Text(w)) = values.get("workspace") {
+            w.clone()
+        } else {
+            self.status_message = "Error: Missing workspace selection".to_string();
+            return;
+        };
+
+        let ecosystem = if let Some(FormValue::Text(e)) = values.get("ecosystem") {
+            e.clone()
+        } else {
+            self.status_message = "Error: Missing ecosystem selection".to_string();
+            return;
+        };
+
+        let project_type = if let Some(FormValue::Text(pt)) = values.get("project_type") {
+            pt.clone()
+        } else {
+            self.status_message = "Error: Missing project type selection".to_string();
+            return;
+        };
+
+        let name = if let Some(FormValue::Text(n)) = values.get("name") {
+            n.clone()
+        } else {
+            self.status_message = "Error: Missing project name".to_string();
+            return;
+        };
+
+        // Validate project name
+        if let Err(e) = crate::projects::validate_project_name(&name) {
+            self.status_message = format!("Invalid project name: {}", e);
+            return;
+        }
+
+        // Create the project
+        match crate::projects::init_project(&workspace, &ecosystem, &project_type, &name) {
+            Ok(project_path) => {
+                self.status_message = format!("✓ Created project: {} at {}", name, project_path.display());
+
+                // Reload projects to show the new one
+                self.hotload();
+
+                // Try to select the newly created project
+                if let Some(pos) = self.projects.iter().position(|p| p.name == name) {
+                    self.selected_project = pos;
+                    self.project_list_state.select(Some(pos));
+
+                    // Switch to detail view to show the new project
+                    self.current_view = View::Detail;
+                }
+            }
+            Err(e) => {
+                self.status_message = format!("Failed to create project: {}", e);
+            }
+        }
+    }
+
     pub fn handle_key(&mut self, key: KeyCode) {
         match key {
             KeyCode::Char('q') | KeyCode::Char('Q') => self.quit(),
@@ -778,6 +839,40 @@ impl App {
             {
                 self.hotload();
                 self.status_message = "✓ Reloaded all state from disk".to_string();
+            }
+            KeyCode::Char('n')
+                if matches!(self.current_view, View::ProjectBrowser)
+                    && matches!(self.input_mode, InputMode::Normal) =>
+            {
+                // New project creation form (from ProjectBrowser view)
+                // Load config to get workspace options
+                let workspace_options: Vec<String> = if let Ok(config) = crate::config::Config::load() {
+                    std::iter::once(config.global.workspace.path.clone())
+                        .chain(config.global.workspace.registered.clone())
+                        .collect()
+                } else {
+                    vec!["~/projects".to_string()] // Fallback
+                };
+
+                let form = crate::forms::Form::new("Create New Project")
+                    .description("Initialize a new project with byte scaffolding")
+                    .select("workspace", "Target Workspace", workspace_options)
+                    .select("ecosystem", "Ecosystem", vec![
+                        "rust".to_string(),
+                        "go".to_string(),
+                        "bun".to_string(),
+                    ])
+                    .select("project_type", "Project Type", vec![
+                        "cli".to_string(),
+                        "web".to_string(),
+                        "lib".to_string(),
+                    ])
+                    .text_input("name", "Project Name", "my-project")
+                    .text_area("description", "Description (optional)", "A brief description...", 3);
+
+                self.active_form = Some(form);
+                self.current_view = View::Form;
+                self.status_message = "Creating new project - press Enter to submit, Esc to cancel".to_string();
             }
             KeyCode::Char('t')
                 if matches!(self.current_view, View::Detail)
@@ -1232,11 +1327,16 @@ impl App {
                 View::Form => {
                     // Submit form on Enter
                     if let Some(form) = &mut self.active_form {
+                        let form_title = form.title.clone();
                         match form.submit() {
-                            Ok(_values) => {
-                                // Form submitted successfully
-                                self.status_message = "Form submitted".to_string();
-                                // TODO: Handle form values
+                            Ok(values) => {
+                                // Handle different form types
+                                if form_title == "Create New Project" {
+                                    self.handle_new_project_form(values);
+                                } else {
+                                    // Other forms (e.g., Git Tag)
+                                    self.status_message = "Form submitted".to_string();
+                                }
                                 self.active_form = None;
                                 self.current_view = View::ProjectBrowser;
                             }
