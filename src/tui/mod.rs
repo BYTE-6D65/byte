@@ -93,6 +93,11 @@ impl CommandFilter {
         ]
     }
 
+    /// Get all log categories (excluding "All" which is UI-only)
+    pub fn log_categories() -> Vec<&'static str> {
+        vec!["build", "lint", "git", "test", "other"]
+    }
+
     pub fn next(&self) -> CommandFilter {
         match self {
             CommandFilter::All => CommandFilter::Build,

@@ -70,7 +70,7 @@ impl ProjectFileSystem {
         let byte_dir = self.byte_dir();
 
         // Create .byte/logs/commands/{category}/ directories
-        for category in &["build", "lint", "git", "test", "other"] {
+        for category in crate::tui::CommandFilter::log_categories() {
             let log_dir = byte_dir.join("logs").join("commands").join(category);
             fs::create_dir_all(&log_dir)
                 .with_context(|| format!("Failed to create log directory: {}", log_dir.display()))?;
