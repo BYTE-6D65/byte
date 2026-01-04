@@ -60,6 +60,55 @@ pub struct WorkspaceDir {
     pub project_count: usize,
 }
 
+// ============================================================================
+// Overlay API - Unified overlay system for full-screen UI elements
+// ============================================================================
+
+/// Position and sizing for overlay content
+#[derive(Clone, Debug)]
+pub enum OverlayPosition {
+    /// Full screen overlay (log viewer, help screen)
+    FullScreen,
+    /// Centered modal with specified dimensions (forms)
+    Centered { width: u16, height: u16 },
+    /// Custom positioned overlay
+    #[allow(dead_code)]
+    Custom { x: u16, y: u16, width: u16, height: u16 },
+}
+
+/// Content types that can be displayed in an overlay
+#[derive(Clone, Debug)]
+pub enum OverlayContent {
+    /// Log file viewer with scroll support
+    LogViewer {
+        log_path: PathBuf,
+        scroll_offset: usize,
+        project_path: String,
+    },
+    /// Form input (project creation, git tag, etc.)
+    Form {
+        form: crate::forms::Form,
+        position: OverlayPosition,
+    },
+    // Future overlay types:
+    // SubProjectBrowser { sub_projects: Vec<Project>, selected_index: usize },
+    // HelpScreen,
+    // CommandHistory { entries: Vec<CommandHistoryEntry>, selected: usize },
+}
+
+impl OverlayContent {
+    /// Get the position/sizing for this overlay
+    #[allow(dead_code)]
+    pub fn position(&self) -> OverlayPosition {
+        match self {
+            OverlayContent::LogViewer { .. } => OverlayPosition::FullScreen,
+            OverlayContent::Form { position, .. } => position.clone(),
+        }
+    }
+}
+
+// ============================================================================
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum CommandFilter {
     All,
@@ -130,6 +179,8 @@ pub enum InputMode {
 pub struct App {
     pub should_quit: bool,
     pub current_view: View,
+    pub previous_view: Option<View>,       // Where to return when overlay closes
+    pub active_overlay: Option<OverlayContent>, // Currently active overlay content
     pub projects: Vec<Project>,
     pub commands: Vec<Command>,
     pub command_filter: CommandFilter, // Active filter for commands view
@@ -166,20 +217,17 @@ pub struct App {
     pub pending_editor: Option<(String, String)>, // (editor, file_path)
     // Log navigation in Details view
     pub selected_log: usize,
-    // Log preview in Details view
-    pub viewing_log: Option<(PathBuf, usize)>, // (path, scroll_offset)
     // Flag to trigger terminal clear on next draw
     pub needs_clear: bool,
-    // Active form (for user input collection)
-    pub active_form: Option<crate::forms::Form>,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub enum View {
     ProjectBrowser,
     CommandPalette,
     Detail,
     WorkspaceManager,
-    Form, // Form input view
+    Overlay, // Unified overlay view (log viewer, forms, help, etc.)
 }
 
 #[derive(Clone)]
@@ -198,6 +246,8 @@ impl Default for App {
         let mut app = Self {
             should_quit: false,
             current_view: View::ProjectBrowser,
+            previous_view: None,
+            active_overlay: None,
             projects: vec![],
             commands: vec![
                 Command {
@@ -245,9 +295,7 @@ impl Default for App {
             command_result_display: None,
             pending_editor: None,
             selected_log: 0,
-            viewing_log: None,
             needs_clear: false,
-            active_form: None,
         };
 
         if !app.projects.is_empty() {
@@ -341,6 +389,45 @@ impl App {
     pub fn quit(&mut self) {
         self.should_quit = true;
     }
+
+    // ========================================================================
+    // Overlay API Methods
+    // ========================================================================
+
+    /// Open an overlay, suspending the current view
+    pub fn open_overlay(&mut self, content: OverlayContent) {
+        // Store current view to return to later
+        self.previous_view = Some(self.current_view);
+        self.active_overlay = Some(content);
+        self.current_view = View::Overlay;
+        self.needs_clear = true; // Ensure clean render
+    }
+
+    /// Close the active overlay and return to previous view
+    pub fn close_overlay(&mut self) {
+        self.active_overlay = None;
+        if let Some(prev) = self.previous_view.take() {
+            self.current_view = prev;
+        } else {
+            // Fallback to project browser if no previous view
+            self.current_view = View::ProjectBrowser;
+        }
+        self.needs_clear = true; // Ensure clean render after overlay closes
+    }
+
+    /// Check if an overlay is currently active
+    #[allow(dead_code)]
+    pub fn has_overlay(&self) -> bool {
+        self.active_overlay.is_some()
+    }
+
+    /// Get mutable reference to active overlay content
+    #[allow(dead_code)]
+    pub fn overlay_mut(&mut self) -> Option<&mut OverlayContent> {
+        self.active_overlay.as_mut()
+    }
+
+    // ========================================================================
 
     pub fn add_workspace(&mut self, path: &str) -> Result<(), String> {
         // Load config
@@ -896,8 +983,11 @@ impl App {
                     .text_input("name", "Project Name", "my-project")
                     .text_area("description", "Description (optional)", "A brief description...", 3);
 
-                self.active_form = Some(form);
-                self.current_view = View::Form;
+                // Use new overlay API for forms
+                self.open_overlay(OverlayContent::Form {
+                    form,
+                    position: OverlayPosition::Centered { width: 80, height: 40 },
+                });
                 self.status_message = "Creating new project - press Enter to submit, Esc to cancel".to_string();
             }
             KeyCode::Char('t')
@@ -912,14 +1002,17 @@ impl App {
                     .checkbox("annotated", "Create annotated tag")
                     .checkbox("push", "Push tag to remote");
 
-                self.active_form = Some(form);
-                self.current_view = View::Form;
-                self.status_message = "Editing form - press Enter to submit, Esc to cancel".to_string();
+                // Use new overlay API for forms
+                self.open_overlay(OverlayContent::Form {
+                    form,
+                    position: OverlayPosition::Centered { width: 80, height: 35 },
+                });
+                self.status_message = "Creating git tag - press Enter to submit, Esc to cancel".to_string();
             }
-            // View switching keys - only when NOT in input mode or Form view
+            // View switching keys - only when NOT in input mode or overlay view
             KeyCode::Char('1')
                 if !matches!(self.input_mode, InputMode::AddingDirectory)
-                && !matches!(self.current_view, View::Form) =>
+                && !matches!(self.current_view, View::Overlay) =>
             {
                 self.current_view = View::ProjectBrowser;
                 self.command_result_display = None; // Clear command result on view switch
@@ -927,7 +1020,7 @@ impl App {
             }
             KeyCode::Char('2')
                 if !matches!(self.input_mode, InputMode::AddingDirectory)
-                && !matches!(self.current_view, View::Form) =>
+                && !matches!(self.current_view, View::Overlay) =>
             {
                 self.current_view = View::CommandPalette;
                 self.update_commands();
@@ -936,7 +1029,7 @@ impl App {
             }
             KeyCode::Char('3')
                 if !matches!(self.input_mode, InputMode::AddingDirectory)
-                && !matches!(self.current_view, View::Form) =>
+                && !matches!(self.current_view, View::Overlay) =>
             {
                 self.current_view = View::Detail;
                 self.selected_log = 0; // Reset log selection
@@ -951,7 +1044,7 @@ impl App {
             }
             KeyCode::Char('4')
                 if !matches!(self.input_mode, InputMode::AddingDirectory)
-                && !matches!(self.current_view, View::Form) =>
+                && !matches!(self.current_view, View::Overlay) =>
             {
                 self.current_view = View::WorkspaceManager;
                 self.command_result_display = None; // Clear command result on view switch
@@ -1020,11 +1113,16 @@ impl App {
                 if matches!(self.current_view, View::Detail)
                     && matches!(self.input_mode, InputMode::Normal) =>
             {
-                // Preview selected log in right panel
+                // Open log viewer overlay
                 if let Some(project) = self.get_selected_project() {
                     let logs = crate::fs::ProjectFileSystem::new(&project.path).ok().and_then(|fs| fs.recent_logs_all(5).ok()).unwrap_or_default();
                     if let Some(log) = logs.get(self.selected_log) {
-                        self.viewing_log = Some((log.path.clone(), 0)); // path, scroll_offset=0
+                        // Use new overlay API
+                        self.open_overlay(OverlayContent::LogViewer {
+                            log_path: log.path.clone(),
+                            scroll_offset: 0,
+                            project_path: project.path.clone(),
+                        });
                         self.status_message = format!("Viewing: {}", log.filename);
                     } else {
                         self.status_message = "✗ No logs available".to_string();
@@ -1053,13 +1151,16 @@ impl App {
                     self.status_message = "✗ No project selected".to_string();
                 }
             }
-            KeyCode::Esc
-                if matches!(self.current_view, View::Detail) && self.viewing_log.is_some() =>
-            {
-                // Close log preview
-                self.viewing_log = None;
-                self.needs_clear = true; // Trigger terminal clear to remove lingering text
-                self.status_message = "Closed log preview".to_string();
+            KeyCode::Esc if matches!(self.current_view, View::Overlay) => {
+                // Close any overlay and return to previous view
+                let overlay_type = self.active_overlay.as_ref().map(|o| match o {
+                    OverlayContent::LogViewer { .. } => "log viewer",
+                    OverlayContent::Form { .. } => "form",
+                });
+                self.close_overlay();
+                if let Some(name) = overlay_type {
+                    self.status_message = format!("Closed {}", name);
+                }
             }
             KeyCode::Esc
                 if matches!(
@@ -1071,15 +1172,6 @@ impl App {
                 self.input_buffer.clear();
                 self.editing_workspace_index = None;
                 self.status_message = "Cancelled".to_string();
-            }
-            KeyCode::Esc if matches!(self.current_view, View::Form) => {
-                // Cancel form
-                if let Some(form) = &mut self.active_form {
-                    form.cancel();
-                    self.active_form = None;
-                    self.current_view = View::ProjectBrowser;
-                    self.status_message = "Form cancelled".to_string();
-                }
             }
             KeyCode::Backspace
                 if matches!(
@@ -1093,9 +1185,9 @@ impl App {
                     self.update_fuzzy_matches();
                 }
             }
-            KeyCode::Backspace if matches!(self.current_view, View::Form) => {
-                // Handle backspace in form fields
-                if let Some(form) = &mut self.active_form {
+            KeyCode::Backspace if matches!(self.current_view, View::Overlay) => {
+                // Handle backspace in overlay form fields
+                if let Some(OverlayContent::Form { form, .. }) = &mut self.active_overlay {
                     if let Some(field) = form.current_field_mut() {
                         field.handle_backspace();
                     }
@@ -1131,9 +1223,9 @@ impl App {
                     self.update_fuzzy_matches();
                 }
             }
-            KeyCode::Char(c) if matches!(self.current_view, View::Form) && c != ' ' => {
-                // Handle character input in form fields (space is handled separately)
-                if let Some(form) = &mut self.active_form {
+            KeyCode::Char(c) if matches!(self.current_view, View::Overlay) && c != ' ' => {
+                // Handle character input in overlay form fields (space is handled separately)
+                if let Some(OverlayContent::Form { form, .. }) = &mut self.active_overlay {
                     if let Some(field) = form.current_field_mut() {
                         field.handle_char(c);
                     }
@@ -1172,18 +1264,23 @@ impl App {
                             }
                         }
                         View::Detail => {
-                            // If viewing a log, scroll within it. Otherwise navigate log list.
-                            if let Some((_path, scroll_offset)) = &mut self.viewing_log {
-                                *scroll_offset = scroll_offset.saturating_sub(1);
-                            } else if self.selected_log > 0 {
+                            // Navigate log list in detail view
+                            if self.selected_log > 0 {
                                 self.selected_log -= 1;
                             }
                         }
-                        View::Form => {
-                            // Handle up in form field
-                            if let Some(form) = &mut self.active_form {
-                                if let Some(field) = form.current_field_mut() {
-                                    field.handle_up();
+                        View::Overlay => {
+                            // Handle overlay-specific up navigation
+                            if let Some(overlay) = &mut self.active_overlay {
+                                match overlay {
+                                    OverlayContent::LogViewer { scroll_offset, .. } => {
+                                        *scroll_offset = scroll_offset.saturating_sub(1);
+                                    }
+                                    OverlayContent::Form { form, .. } => {
+                                        if let Some(field) = form.current_field_mut() {
+                                            field.handle_up();
+                                        }
+                                    }
                                 }
                             }
                         }
@@ -1231,21 +1328,26 @@ impl App {
                             }
                         }
                         View::Detail => {
-                            // If viewing a log, scroll within it. Otherwise navigate log list.
-                            if let Some((_path, scroll_offset)) = &mut self.viewing_log {
-                                *scroll_offset = scroll_offset.saturating_add(1);
-                            } else if let Some(project) = self.get_selected_project() {
+                            // Navigate log list in detail view
+                            if let Some(project) = self.get_selected_project() {
                                 let log_count = crate::fs::ProjectFileSystem::new(&project.path).ok().and_then(|fs| fs.recent_logs_all(5).ok()).unwrap_or_default().len();
                                 if self.selected_log < log_count.saturating_sub(1) {
                                     self.selected_log += 1;
                                 }
                             }
                         }
-                        View::Form => {
-                            // Handle down in form field
-                            if let Some(form) = &mut self.active_form {
-                                if let Some(field) = form.current_field_mut() {
-                                    field.handle_down();
+                        View::Overlay => {
+                            // Handle overlay-specific down navigation
+                            if let Some(overlay) = &mut self.active_overlay {
+                                match overlay {
+                                    OverlayContent::LogViewer { scroll_offset, .. } => {
+                                        *scroll_offset = scroll_offset.saturating_add(1);
+                                    }
+                                    OverlayContent::Form { form, .. } => {
+                                        if let Some(field) = form.current_field_mut() {
+                                            field.handle_down();
+                                        }
+                                    }
                                 }
                             }
                         }
@@ -1253,17 +1355,17 @@ impl App {
                 }
             }
             KeyCode::PageUp => {
-                // Scroll log preview up
-                if matches!(self.current_view, View::Detail) {
-                    if let Some((_path, scroll_offset)) = &mut self.viewing_log {
+                // Scroll overlay log viewer up (page)
+                if matches!(self.current_view, View::Overlay) {
+                    if let Some(OverlayContent::LogViewer { scroll_offset, .. }) = &mut self.active_overlay {
                         *scroll_offset = scroll_offset.saturating_sub(10);
                     }
                 }
             }
             KeyCode::PageDown => {
-                // Scroll log preview down
-                if matches!(self.current_view, View::Detail) {
-                    if let Some((_path, scroll_offset)) = &mut self.viewing_log {
+                // Scroll overlay log viewer down (page)
+                if matches!(self.current_view, View::Overlay) {
+                    if let Some(OverlayContent::LogViewer { scroll_offset, .. }) = &mut self.active_overlay {
                         *scroll_offset = scroll_offset.saturating_add(10);
                     }
                 }
@@ -1350,16 +1452,15 @@ impl App {
                     }
                 }
                 View::Detail => {}
-                View::Form => {
-                    // Submit form on Enter
-                    if let Some(form) = &mut self.active_form {
+                View::Overlay => {
+                    // Submit form on Enter (if in form overlay)
+                    if let Some(OverlayContent::Form { form, .. }) = &mut self.active_overlay {
                         let form_type = form.form_type;
                         match form.submit() {
                             Ok(values) => {
-                                // Dispatch to handler based on form type
+                                // Close overlay and dispatch to handler
+                                self.close_overlay();
                                 self.handle_form_submission(form_type, values);
-                                self.active_form = None;
-                                self.current_view = View::ProjectBrowser;
                             }
                             Err(err) => {
                                 self.status_message = format!("Validation error: {}", err);
@@ -1369,24 +1470,24 @@ impl App {
                 }
             },
             KeyCode::Tab => {
-                // Tab to next field in forms
-                if matches!(self.current_view, View::Form) {
-                    if let Some(form) = &mut self.active_form {
+                // Tab to next field in overlay forms
+                if matches!(self.current_view, View::Overlay) {
+                    if let Some(OverlayContent::Form { form, .. }) = &mut self.active_overlay {
                         form.next_field();
                     }
                 }
             }
             KeyCode::BackTab => {
-                // Shift+Tab to previous field in forms
-                if matches!(self.current_view, View::Form) {
-                    if let Some(form) = &mut self.active_form {
+                // Shift+Tab to previous field in overlay forms
+                if matches!(self.current_view, View::Overlay) {
+                    if let Some(OverlayContent::Form { form, .. }) = &mut self.active_overlay {
                         form.prev_field();
                     }
                 }
             }
-            KeyCode::Char(' ') if matches!(self.current_view, View::Form) => {
-                // Space to toggle checkboxes/multi-select
-                if let Some(form) = &mut self.active_form {
+            KeyCode::Char(' ') if matches!(self.current_view, View::Overlay) => {
+                // Space to toggle checkboxes/multi-select in overlay forms
+                if let Some(OverlayContent::Form { form, .. }) = &mut self.active_overlay {
                     if let Some(field) = form.current_field_mut() {
                         field.handle_space();
                     }
@@ -2175,7 +2276,7 @@ fn ui(f: &mut Frame, app: &App) {
         View::CommandPalette => render_command_palette(f, chunks[2], app),
         View::Detail => render_detail(f, chunks[2], app),
         View::WorkspaceManager => render_workspace_manager(f, chunks[2], app),
-        View::Form => render_form(f, chunks[2], app),
+        View::Overlay => render_overlay(f, chunks[2], app),
     }
 
     // Footer
@@ -2193,7 +2294,7 @@ fn render_tab_bar(f: &mut Frame, area: ratatui::layout::Rect, app: &App) {
         View::CommandPalette => 1,
         View::Detail => 2,
         View::WorkspaceManager => 3,
-        View::Form => 99, // Form is a modal, not a tab
+        View::Overlay => 99, // Overlay is modal, not a tab
     };
 
     let tabs = vec![
@@ -2640,71 +2741,43 @@ fn render_command_palette(f: &mut Frame, area: ratatui::layout::Rect, app: &App)
 }
 
 fn render_detail(f: &mut Frame, area: ratatui::layout::Rect, app: &App) {
-    // Maximize vertical space when viewing log
-    let vertical_margin = if app.viewing_log.is_some() { 0 } else { 1 };
+    // Note: Log viewing now uses the overlay API (View::Overlay with OverlayContent::LogViewer)
     let inner_area = area.inner(Margin {
         horizontal: 2,
-        vertical: vertical_margin,
+        vertical: 1,
     });
-
-    // When viewing log, use full width for preview. Otherwise show details normally.
-    let (details_area, log_area) = if app.viewing_log.is_some() {
-        // Full screen log preview - hide details panel
-        (inner_area, Some(inner_area))
-    } else {
-        (inner_area, None)
-    };
 
     if let Some(project) = app.get_selected_project() {
         let mut lines = vec![];
 
-        // Simple single-column layout when viewing log, 2-column when not
-        if app.viewing_log.is_some() {
-            // Compact vertical layout - just project name and description
-            lines.push(Line::from(vec![
-                Span::styled(
-                    &project.name,
-                    Style::default()
-                        .fg(theme::ACCENT)
-                        .add_modifier(Modifier::BOLD),
-                ),
-            ]));
-            lines.push(Line::from(""));
-            lines.push(Line::from(vec![Span::styled(
-                &project.description,
-                Style::default().fg(theme::TEXT_SECONDARY),
-            )]));
-            lines.push(Line::from(""));
-        } else {
-            // Full 2-column layout when not viewing log
-            let total_width = details_area.width.saturating_sub(4) as usize;
-            let left_width = (total_width * 70) / 100;
-            let right_width = total_width.saturating_sub(left_width);
+        // Full 2-column layout
+        let total_width = inner_area.width.saturating_sub(4) as usize;
+        let left_width = (total_width * 70) / 100;
+        let right_width = total_width.saturating_sub(left_width);
 
-            // Truncate path to fit in right column (accounting for "PATH: " prefix)
-            let path_prefix = "PATH: ";
-            let max_path_width = right_width.saturating_sub(path_prefix.len());
-            let truncated_path = truncate_path(&project.path, max_path_width);
+        // Truncate path to fit in right column (accounting for "PATH: " prefix)
+        let path_prefix = "PATH: ";
+        let max_path_width = right_width.saturating_sub(path_prefix.len());
+        let truncated_path = truncate_path(&project.path, max_path_width);
 
-            lines.push(Line::from(vec![
-                Span::styled(
-                    format!("{:width$}", project.name, width = left_width),
-                    Style::default()
-                        .fg(theme::ACCENT)
-                        .add_modifier(Modifier::BOLD),
-                ),
-                Span::styled(
-                    format!("{}{}", path_prefix, truncated_path),
-                    Style::default().fg(theme::TEXT_SECONDARY),
-                ),
-            ]));
-            lines.push(Line::from(""));
-            lines.push(Line::from(vec![Span::styled(
-                project.description.clone(),
+        lines.push(Line::from(vec![
+            Span::styled(
+                format!("{:width$}", project.name, width = left_width),
+                Style::default()
+                    .fg(theme::ACCENT)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                format!("{}{}", path_prefix, truncated_path),
                 Style::default().fg(theme::TEXT_SECONDARY),
-            )]));
-            lines.push(Line::from(""));
-        }
+            ),
+        ]));
+        lines.push(Line::from(""));
+        lines.push(Line::from(vec![Span::styled(
+            project.description.clone(),
+            Style::default().fg(theme::TEXT_SECONDARY),
+        )]));
+        lines.push(Line::from(""));
 
         // Git Status and Build State
         if let Some(state) = app.get_current_project_state() {
@@ -2735,18 +2808,8 @@ fn render_detail(f: &mut Frame, area: ratatui::layout::Rect, app: &App) {
             ),
         ]));
 
-        // Only render details panel if NOT viewing log
-        if app.viewing_log.is_none() {
-            let paragraph = Paragraph::new(lines).block(Block::default().borders(Borders::NONE));
-            f.render_widget(paragraph, details_area);
-        }
-
-        // Render log preview if viewing (full screen)
-        if let Some((log_path, scroll_offset)) = &app.viewing_log {
-            if let Some(area) = log_area {
-                render_log_preview(f, area, log_path, *scroll_offset, &project.path);
-            }
-        }
+        let paragraph = Paragraph::new(lines).block(Block::default().borders(Borders::NONE));
+        f.render_widget(paragraph, inner_area);
     } else {
         let paragraph = Paragraph::new(vec![
             Line::from(""),
@@ -2757,7 +2820,7 @@ fn render_detail(f: &mut Frame, area: ratatui::layout::Rect, app: &App) {
         ])
         .block(Block::default().borders(Borders::NONE))
         .alignment(Alignment::Center);
-        f.render_widget(paragraph, details_area);
+        f.render_widget(paragraph, inner_area);
     }
 }
 
@@ -2987,85 +3050,6 @@ fn render_recent_logs(project_path: &str, selected_log: usize) -> Vec<Line<'_>> 
     lines
 }
 
-/// Render log file preview
-fn render_log_preview(f: &mut Frame, area: ratatui::layout::Rect, log_path: &PathBuf, scroll_offset: usize, project_path: &str) {
-    use std::fs;
-    use std::io::{BufRead, BufReader};
-
-    // Get filename for display
-    let filename = log_path.file_name()
-        .and_then(|n| n.to_str())
-        .unwrap_or("unknown");
-
-    // Read log file
-    let content = match fs::File::open(log_path) {
-        Ok(file) => {
-            let reader = BufReader::new(file);
-            let lines: Vec<String> = reader.lines()
-                .filter_map(|line| line.ok())
-                .collect();
-            lines
-        }
-        Err(e) => {
-            vec![format!("Error reading log file: {}", e)]
-        }
-    };
-
-    // Calculate visible range - maximize visible content
-    let total_lines = content.len();
-    let visible_height = area.height.saturating_sub(4) as usize; // Only borders + 2-line header
-    let start_line = scroll_offset.min(total_lines.saturating_sub(1));
-    let end_line = (start_line + visible_height).min(total_lines);
-
-    // Create lines to display
-    let mut display_lines = vec![];
-
-    // Calculate available width for path truncation (account for borders: 2 chars)
-    let available_width = area.width.saturating_sub(2) as usize;
-    let path_prefix = "PATH: ";
-    let max_path_width = available_width.saturating_sub(path_prefix.len());
-    let truncated_project_path = truncate_path(project_path, max_path_width);
-
-    // Ultra-compact 2-line header
-    display_lines.push(Line::from(vec![
-        Span::styled(filename, Style::default().fg(theme::ACCENT).add_modifier(Modifier::BOLD)),
-        Span::raw("  "),
-        Span::styled(
-            format!("({}/{})", start_line + 1, total_lines),
-            Style::default().fg(theme::TEXT_SECONDARY),
-        ),
-    ]));
-    display_lines.push(Line::from(vec![
-        Span::styled(
-            format!("{}{}", path_prefix, truncated_project_path),
-            Style::default().fg(theme::TEXT_SECONDARY),
-        ),
-    ]));
-
-    // Add visible lines with character-based truncation (prevents text bleed)
-    let content_width = available_width; // Full width for log content
-    for line in content.iter().skip(start_line).take(end_line - start_line) {
-        // Strip ANSI codes and truncate to fit width (character-based, not byte-based)
-        let stripped = strip_ansi_codes(line);
-        let char_count = stripped.chars().count();
-        let truncated = if char_count > content_width {
-            // Use character-based truncation to avoid breaking UTF-8
-            let truncated_chars: String = stripped.chars().take(content_width.saturating_sub(1)).collect();
-            format!("{}…", truncated_chars)
-        } else {
-            stripped
-        };
-        display_lines.push(Line::from(truncated));
-    }
-
-    let paragraph = Paragraph::new(display_lines)
-        .block(Block::default()
-            .borders(Borders::ALL)
-            .border_type(ratatui::widgets::BorderType::Rounded)
-            .border_style(Style::default().fg(theme::ACCENT)));
-
-    f.render_widget(paragraph, area);
-}
 
 fn render_workspace_manager(f: &mut Frame, area: ratatui::layout::Rect, app: &App) {
     let inner_area = area.inner(Margin {
@@ -3394,13 +3378,137 @@ fn create_centered_modal(
     modal_area
 }
 
-fn render_form(f: &mut Frame, area: ratatui::layout::Rect, app: &App) {
-    let Some(form) = &app.active_form else {
+fn render_overlay(f: &mut Frame, area: ratatui::layout::Rect, app: &App) {
+    let Some(overlay) = &app.active_overlay else {
+        // No overlay active - this shouldn't happen if View::Overlay is set
         return;
     };
 
-    // Create centered modal with cleared background
-    let modal_area = create_centered_modal(f, area, 80, 40);
+    match overlay {
+        OverlayContent::LogViewer { log_path, scroll_offset, project_path } => {
+            render_overlay_log_viewer(f, area, log_path, *scroll_offset, project_path);
+        }
+        OverlayContent::Form { form, position } => {
+            render_overlay_form(f, area, form, position);
+        }
+    }
+}
+
+/// Render log viewer in overlay mode (full screen)
+fn render_overlay_log_viewer(
+    f: &mut Frame,
+    area: ratatui::layout::Rect,
+    log_path: &PathBuf,
+    scroll_offset: usize,
+    project_path: &str,
+) {
+    use std::fs;
+    use std::io::{BufRead, BufReader};
+
+    // Use minimal margin for maximum content visibility
+    let inner_area = area.inner(Margin {
+        horizontal: 1,
+        vertical: 0,
+    });
+
+    // Get filename for display
+    let filename = log_path.file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("unknown");
+
+    // Read log file
+    let content = match fs::File::open(log_path) {
+        Ok(file) => {
+            let reader = BufReader::new(file);
+            let lines: Vec<String> = reader.lines()
+                .filter_map(|line| line.ok())
+                .collect();
+            lines
+        }
+        Err(e) => {
+            vec![format!("Error reading log file: {}", e)]
+        }
+    };
+
+    // Calculate visible range - maximize visible content
+    let total_lines = content.len();
+    let visible_height = inner_area.height.saturating_sub(4) as usize; // borders + 2-line header
+    let start_line = scroll_offset.min(total_lines.saturating_sub(1));
+    let end_line = (start_line + visible_height).min(total_lines);
+
+    // Create lines to display
+    let mut display_lines = vec![];
+
+    // Calculate available width for path truncation (account for borders: 2 chars)
+    let available_width = inner_area.width.saturating_sub(2) as usize;
+    let path_prefix = "PATH: ";
+    let max_path_width = available_width.saturating_sub(path_prefix.len());
+    let truncated_project_path = truncate_path(project_path, max_path_width);
+
+    // Ultra-compact 2-line header
+    display_lines.push(Line::from(vec![
+        Span::styled(filename, Style::default().fg(theme::ACCENT).add_modifier(Modifier::BOLD)),
+        Span::raw("  "),
+        Span::styled(
+            format!("({}/{})", start_line + 1, total_lines),
+            Style::default().fg(theme::TEXT_SECONDARY),
+        ),
+        Span::raw("  "),
+        Span::styled("[Esc] close  [↑↓] scroll  [PgUp/PgDn] page", Style::default().fg(theme::TEXT_SECONDARY)),
+    ]));
+    display_lines.push(Line::from(vec![
+        Span::styled(
+            format!("{}{}", path_prefix, truncated_project_path),
+            Style::default().fg(theme::TEXT_SECONDARY),
+        ),
+    ]));
+
+    // Add visible lines with character-based truncation (prevents text bleed)
+    let content_width = available_width;
+    for line in content.iter().skip(start_line).take(end_line - start_line) {
+        // Strip ANSI codes and truncate to fit width (character-based, not byte-based)
+        let stripped = strip_ansi_codes(line);
+        let char_count = stripped.chars().count();
+        let truncated = if char_count > content_width {
+            let truncated_chars: String = stripped.chars().take(content_width.saturating_sub(1)).collect();
+            format!("{}…", truncated_chars)
+        } else {
+            stripped
+        };
+        display_lines.push(Line::from(truncated));
+    }
+
+    let paragraph = Paragraph::new(display_lines)
+        .block(Block::default()
+            .borders(Borders::ALL)
+            .border_type(ratatui::widgets::BorderType::Rounded)
+            .border_style(Style::default().fg(theme::ACCENT)));
+
+    f.render_widget(paragraph, inner_area);
+}
+
+/// Render form in overlay mode (centered modal)
+fn render_overlay_form(
+    f: &mut Frame,
+    area: ratatui::layout::Rect,
+    form: &crate::forms::Form,
+    position: &OverlayPosition,
+) {
+    // Determine modal dimensions based on position
+    let modal_area = match position {
+        OverlayPosition::FullScreen => area,
+        OverlayPosition::Centered { width, height } => {
+            create_centered_modal(f, area, *width, *height)
+        }
+        OverlayPosition::Custom { x, y, width, height } => {
+            ratatui::layout::Rect {
+                x: *x,
+                y: *y,
+                width: *width,
+                height: *height,
+            }
+        }
+    };
 
     // Inner area with padding
     let inner_area = modal_area.inner(Margin {
@@ -3483,171 +3591,7 @@ fn render_form(f: &mut Frame, area: ratatui::layout::Rect, app: &App) {
         ]));
 
         // Render field value based on type
-        match field {
-            crate::forms::FormField::TextInput { value, placeholder, .. }
-            | crate::forms::FormField::Email { value, placeholder, .. } => {
-                let display = if value.is_empty() {
-                    placeholder.as_str()
-                } else {
-                    value.as_str()
-                };
-                let value_style = if value.is_empty() {
-                    Style::default().fg(theme::TEXT_SECONDARY)
-                } else if is_current {
-                    Style::default().fg(theme::TEXT_PRIMARY).add_modifier(Modifier::UNDERLINED)
-                } else {
-                    Style::default().fg(theme::TEXT_PRIMARY)
-                };
-                field_lines.push(Line::from(vec![
-                    Span::raw("     "),
-                    Span::styled(display, value_style),
-                    if is_current {
-                        Span::styled("█", Style::default().fg(theme::ACCENT))
-                    } else {
-                        Span::raw("")
-                    },
-                ]));
-            }
-            crate::forms::FormField::TextArea { value, placeholder, height, .. } => {
-                let display = if value.is_empty() {
-                    placeholder.as_str()
-                } else {
-                    value.as_str()
-                };
-                let value_style = if value.is_empty() {
-                    Style::default().fg(theme::TEXT_SECONDARY)
-                } else {
-                    Style::default().fg(theme::TEXT_PRIMARY)
-                };
-                // Split into lines for multi-line display
-                for line in display.lines().take(*height) {
-                    field_lines.push(Line::from(vec![
-                        Span::raw("     "),
-                        Span::styled(line, value_style),
-                    ]));
-                }
-                if is_current {
-                    field_lines.push(Line::from(vec![
-                        Span::raw("     "),
-                        Span::styled("█", Style::default().fg(theme::ACCENT)),
-                    ]));
-                }
-            }
-            // Future: Number field rendering
-            crate::forms::FormField::Number { value, min, max, .. } => {
-                let mut display_parts = vec![value.to_string()];
-                if let Some(min_val) = min {
-                    if let Some(max_val) = max {
-                        display_parts.push(format!(" (range: {}-{})", min_val, max_val));
-                    } else {
-                        display_parts.push(format!(" (min: {})", min_val));
-                    }
-                } else if let Some(max_val) = max {
-                    display_parts.push(format!(" (max: {})", max_val));
-                }
-                let display = display_parts.join("");
-                let value_style = if is_current {
-                    Style::default().fg(theme::TEXT_PRIMARY).add_modifier(Modifier::UNDERLINED)
-                } else {
-                    Style::default().fg(theme::TEXT_PRIMARY)
-                };
-                field_lines.push(Line::from(vec![
-                    Span::raw("     "),
-                    Span::styled(display, value_style),
-                    if is_current {
-                        Span::styled("█", Style::default().fg(theme::ACCENT))
-                    } else {
-                        Span::raw("")
-                    },
-                ]));
-            }
-            // Future: Select dropdown rendering
-            crate::forms::FormField::Select { options, selected, .. } => {
-                for (idx, option) in options.iter().enumerate() {
-                    let is_selected = idx == *selected;
-                    let marker = if is_selected { "●" } else { "○" };
-                    let style = if is_current && is_selected {
-                        Style::default().fg(theme::ACCENT).add_modifier(Modifier::BOLD)
-                    } else if is_selected {
-                        Style::default().fg(theme::SUCCESS)
-                    } else {
-                        Style::default().fg(theme::TEXT_SECONDARY)
-                    };
-                    field_lines.push(Line::from(vec![
-                        Span::raw("     "),
-                        Span::styled(marker, style),
-                        Span::raw(" "),
-                        Span::styled(option, style),
-                    ]));
-                }
-            }
-            // Future: Multi-select checkboxes rendering
-            crate::forms::FormField::MultiSelect { options, selected, .. } => {
-                for (idx, option) in options.iter().enumerate() {
-                    let is_selected = selected.contains(&idx);
-                    let marker = if is_selected { "☑" } else { "☐" };
-                    let style = if is_current {
-                        if is_selected {
-                            Style::default().fg(theme::ACCENT).add_modifier(Modifier::BOLD)
-                        } else {
-                            Style::default().fg(theme::ACCENT)
-                        }
-                    } else if is_selected {
-                        Style::default().fg(theme::SUCCESS)
-                    } else {
-                        Style::default().fg(theme::TEXT_SECONDARY)
-                    };
-                    field_lines.push(Line::from(vec![
-                        Span::raw("     "),
-                        Span::styled(marker, style),
-                        Span::raw(" "),
-                        Span::styled(option, style),
-                    ]));
-                }
-            }
-            // Future: Path picker rendering
-            crate::forms::FormField::Path { value, kind, .. } => {
-                let display = if value.is_empty() {
-                    match kind {
-                        crate::forms::PathKind::File => "Select a file...",
-                        crate::forms::PathKind::Directory => "Select a directory...",
-                        crate::forms::PathKind::Any => "Select a path...",
-                    }
-                } else {
-                    value.as_str()
-                };
-                let value_style = if value.is_empty() {
-                    Style::default().fg(theme::TEXT_SECONDARY)
-                } else if is_current {
-                    Style::default().fg(theme::TEXT_PRIMARY).add_modifier(Modifier::UNDERLINED)
-                } else {
-                    Style::default().fg(theme::TEXT_PRIMARY)
-                };
-                field_lines.push(Line::from(vec![
-                    Span::raw("     "),
-                    Span::styled(display, value_style),
-                    if is_current {
-                        Span::styled("█", Style::default().fg(theme::ACCENT))
-                    } else {
-                        Span::raw("")
-                    },
-                ]));
-            }
-            crate::forms::FormField::Checkbox { checked, .. } => {
-                let marker = if *checked { "☑" } else { "☐" };
-                let style = if is_current {
-                    Style::default().fg(theme::ACCENT)
-                } else if *checked {
-                    Style::default().fg(theme::SUCCESS)
-                } else {
-                    Style::default().fg(theme::TEXT_SECONDARY)
-                };
-                field_lines.push(Line::from(vec![
-                    Span::raw("     "),
-                    Span::styled(marker, style),
-                ]));
-            }
-        }
+        render_form_field(&mut field_lines, field, is_current);
     }
 
     let fields_widget = Paragraph::new(field_lines)
@@ -3678,6 +3622,172 @@ fn render_form(f: &mut Frame, area: ratatui::layout::Rect, app: &App) {
         .style(Style::default().bg(Color::Black));
     f.render_widget(help, chunks[chunk_idx]);
 }
+
+/// Helper function to render form field values
+fn render_form_field<'a>(field_lines: &mut Vec<Line<'a>>, field: &'a crate::forms::FormField, is_current: bool) {
+    match field {
+        crate::forms::FormField::TextInput { value, placeholder, .. }
+        | crate::forms::FormField::Email { value, placeholder, .. } => {
+            let display = if value.is_empty() {
+                placeholder.as_str()
+            } else {
+                value.as_str()
+            };
+            let value_style = if value.is_empty() {
+                Style::default().fg(theme::TEXT_SECONDARY)
+            } else if is_current {
+                Style::default().fg(theme::TEXT_PRIMARY).add_modifier(Modifier::UNDERLINED)
+            } else {
+                Style::default().fg(theme::TEXT_PRIMARY)
+            };
+            field_lines.push(Line::from(vec![
+                Span::raw("     "),
+                Span::styled(display, value_style),
+                if is_current {
+                    Span::styled("█", Style::default().fg(theme::ACCENT))
+                } else {
+                    Span::raw("")
+                },
+            ]));
+        }
+        crate::forms::FormField::TextArea { value, placeholder, height, .. } => {
+            let display = if value.is_empty() {
+                placeholder.as_str()
+            } else {
+                value.as_str()
+            };
+            let value_style = if value.is_empty() {
+                Style::default().fg(theme::TEXT_SECONDARY)
+            } else {
+                Style::default().fg(theme::TEXT_PRIMARY)
+            };
+            for line in display.lines().take(*height) {
+                field_lines.push(Line::from(vec![
+                    Span::raw("     "),
+                    Span::styled(line, value_style),
+                ]));
+            }
+            if is_current {
+                field_lines.push(Line::from(vec![
+                    Span::raw("     "),
+                    Span::styled("█", Style::default().fg(theme::ACCENT)),
+                ]));
+            }
+        }
+        crate::forms::FormField::Number { value, min, max, .. } => {
+            let mut display_parts = vec![value.to_string()];
+            if let Some(min_val) = min {
+                if let Some(max_val) = max {
+                    display_parts.push(format!(" (range: {}-{})", min_val, max_val));
+                } else {
+                    display_parts.push(format!(" (min: {})", min_val));
+                }
+            } else if let Some(max_val) = max {
+                display_parts.push(format!(" (max: {})", max_val));
+            }
+            let display = display_parts.join("");
+            let value_style = if is_current {
+                Style::default().fg(theme::TEXT_PRIMARY).add_modifier(Modifier::UNDERLINED)
+            } else {
+                Style::default().fg(theme::TEXT_PRIMARY)
+            };
+            field_lines.push(Line::from(vec![
+                Span::raw("     "),
+                Span::styled(display, value_style),
+                if is_current {
+                    Span::styled("█", Style::default().fg(theme::ACCENT))
+                } else {
+                    Span::raw("")
+                },
+            ]));
+        }
+        crate::forms::FormField::Select { options, selected, .. } => {
+            for (idx, option) in options.iter().enumerate() {
+                let is_selected = idx == *selected;
+                let marker = if is_selected { "●" } else { "○" };
+                let style = if is_current && is_selected {
+                    Style::default().fg(theme::ACCENT).add_modifier(Modifier::BOLD)
+                } else if is_selected {
+                    Style::default().fg(theme::SUCCESS)
+                } else {
+                    Style::default().fg(theme::TEXT_SECONDARY)
+                };
+                field_lines.push(Line::from(vec![
+                    Span::raw("     "),
+                    Span::styled(marker, style),
+                    Span::raw(" "),
+                    Span::styled(option, style),
+                ]));
+            }
+        }
+        crate::forms::FormField::MultiSelect { options, selected, .. } => {
+            for (idx, option) in options.iter().enumerate() {
+                let is_selected = selected.contains(&idx);
+                let marker = if is_selected { "☑" } else { "☐" };
+                let style = if is_current {
+                    if is_selected {
+                        Style::default().fg(theme::ACCENT).add_modifier(Modifier::BOLD)
+                    } else {
+                        Style::default().fg(theme::ACCENT)
+                    }
+                } else if is_selected {
+                    Style::default().fg(theme::SUCCESS)
+                } else {
+                    Style::default().fg(theme::TEXT_SECONDARY)
+                };
+                field_lines.push(Line::from(vec![
+                    Span::raw("     "),
+                    Span::styled(marker, style),
+                    Span::raw(" "),
+                    Span::styled(option, style),
+                ]));
+            }
+        }
+        crate::forms::FormField::Path { value, kind, .. } => {
+            let display = if value.is_empty() {
+                match kind {
+                    crate::forms::PathKind::File => "Select a file...",
+                    crate::forms::PathKind::Directory => "Select a directory...",
+                    crate::forms::PathKind::Any => "Select a path...",
+                }
+            } else {
+                value.as_str()
+            };
+            let value_style = if value.is_empty() {
+                Style::default().fg(theme::TEXT_SECONDARY)
+            } else if is_current {
+                Style::default().fg(theme::TEXT_PRIMARY).add_modifier(Modifier::UNDERLINED)
+            } else {
+                Style::default().fg(theme::TEXT_PRIMARY)
+            };
+            field_lines.push(Line::from(vec![
+                Span::raw("     "),
+                Span::styled(display, value_style),
+                if is_current {
+                    Span::styled("█", Style::default().fg(theme::ACCENT))
+                } else {
+                    Span::raw("")
+                },
+            ]));
+        }
+        crate::forms::FormField::Checkbox { checked, .. } => {
+            let marker = if *checked { "☑" } else { "☐" };
+            let style = if is_current {
+                Style::default().fg(theme::ACCENT)
+            } else if *checked {
+                Style::default().fg(theme::SUCCESS)
+            } else {
+                Style::default().fg(theme::TEXT_SECONDARY)
+            };
+            field_lines.push(Line::from(vec![
+                Span::raw("     "),
+                Span::styled(marker, style),
+            ]));
+        }
+    }
+}
+
+// ============================================================================
 
 /// Render horizontal progress bar on the right side
 fn render_progress_bar(f: &mut Frame, area: ratatui::layout::Rect, app: &App) {
