@@ -23,34 +23,25 @@
 
 ### Phase 1: Core Workflow (v0.5.0)
 
-#### New Project Creation Flow
+#### ✅ New Project Creation Flow (COMPLETED 2026-01-03)
 **Priority**: CRITICAL
-**Status**: Missing fundamental workflow
+**Status**: ✅ Implemented and shipped
 
-Currently byte has:
-- ✅ Tools to initialize projects (`byte init`, `init_project()` API)
-- ✅ Forms system for input collection
-- ✅ Workspace management
-- ❌ **No TUI flow to create new projects interactively**
+Implementation:
+- Press `n` in Project Browser → Opens "Create New Project" form
+- Multi-step form with Select dropdowns for workspace, ecosystem, project type
+- Text input for project name (validated via `validate_project_name()`)
+- Multiline text area for optional description
+- Form submission calls `init_project()` and auto-reloads projects
+- Newly created project is auto-selected and displayed in Detail view
 
-Proposed flow:
-1. Press `n` in project browser → Enter "Create New Project" mode
-2. Multi-step form using existing forms system:
-   - **Step 1**: Select target workspace (from registered workspaces)
-   - **Step 2**: Choose ecosystem (Rust/Go/Bun/Node)
-   - **Step 3**: Choose project type (CLI/Web/Library)
-   - **Step 4**: Enter project name (with validation)
-   - **Step 5**: Optional description
-3. Show confirmation with full path preview
-4. Execute creation using existing `init_project()` function
-5. Auto-reload projects and select newly created project
+Navigation:
+- `n` to open form
+- Tab/Shift+Tab to navigate fields
+- Up/Down arrows for dropdowns
+- Enter to submit, Esc to cancel
 
-Implementation notes:
-- Reuse `forms/mod.rs` for multi-step input
-- Reuse `projects::init_project()` for actual creation
-- Reuse `validate_project_name()` for name validation
-- Add workspace picker (similar to fuzzy path picker)
-- All infrastructure exists - just needs the flow wired up
+Code: Implemented in `src/tui/mod.rs` (lines 843-877, 770-829, 1263-1284)
 
 ---
 
