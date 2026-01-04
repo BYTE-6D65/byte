@@ -557,8 +557,10 @@ impl App {
 
                             // Log command output using FS API
                             if let Ok(fs_api) = crate::fs::ProjectFileSystem::new(&working_dir_clone) {
+                                // Categorize command to determine log directory
+                                let category = Self::categorize_command(&command).as_str().to_lowercase();
                                 let _ = fs_api.write_command_log(
-                                    "other",
+                                    &category,
                                     &command,
                                     &stdout,
                                     &stderr,

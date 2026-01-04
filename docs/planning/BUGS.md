@@ -37,6 +37,15 @@ See [ROADMAP.md](./ROADMAP.md) for planned features including:
 
 ## Recently Fixed
 
+### Log Categorization Broken (Fixed 2026-01-03)
+- ✅ Fixed hardcoded "other" category for all command logs
+- ✅ Now uses existing `categorize_command()` function to properly categorize logs
+- Commands are now correctly categorized as: build, lint, git, test, or other
+- Log files with "check" correctly categorized as "lint"
+- Log files with "build" correctly categorized as "build"
+- Log files with "git" correctly categorized as "git"
+- Log files with "clippy" correctly categorized as "lint"
+
 ### UTF-8 Text Corruption in Log Viewer and Path Displays (Fixed 2026-01-03)
 - ✅ Fixed byte-based slicing breaking multi-byte UTF-8 characters
 - ✅ Converted `strip_ansi_codes()` from byte-based to character-based iteration
